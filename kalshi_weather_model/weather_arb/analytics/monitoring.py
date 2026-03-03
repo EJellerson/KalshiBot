@@ -126,7 +126,7 @@ def parquet_inventory(dir_path: Path, prefix: str = "") -> dict[str, Any]:
     total_rows = 0
     for p in files:
         total_rows += _parquet_rows_quick(p)
-    latest = files[-1] if files else None
+    latest = max(files, key=lambda p: p.stat().st_mtime) if files else None
     return {
         "files": len(files),
         "rows": total_rows,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -10,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from weather_arb import config
+import pyarrow.parquet as pq
+
 from weather_arb.analytics.monitoring import (
     data_inventory_snapshot,
     operational_alerts_snapshot,
@@ -21,6 +25,41 @@ from weather_arb.utils.io_utils import safe_read_json
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parquet_row_count(path: Path) -> int:
+    try:
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        return 0
+
+
+def _chart_data() -> dict[str, Any]:
+    """Build all three chart series for the Overview tab."""
+    payload = safe_read_json(config.PAPER_METRICS_DAILY_PATH) or {}
+    by_day: dict[str, Any] = payload.get("by_day", {})
+
+    equity_series: list[dict[str, Any]] = []
+    pnl_series: list[dict[str, Any]] = []
+
+    if by_day:
+        running = float(config.PAPER_ACCOUNT_SIZE)
+        for day_key in sorted(by_day.keys()):
+            day_pnl = float(by_day[day_key].get("pnl_dollars", 0) or 0)
+            running += day_pnl
+            equity_series.append({"date": day_key, "equity": round(running, 2)})
+            pnl_series.append({"date": day_key, "pnl": round(day_pnl, 2)})
+
+    signal_series: list[dict[str, Any]] = []
+    for path in sorted(config.SIGNALS_DIR.glob("signals_*.parquet")):
+        date_part = path.stem.replace("signals_", "", 1)
+        signal_series.append({"date": date_part, "count": _parquet_row_count(path)})
+
+    return {
+        "equity_curve": equity_series,
+        "daily_pnl": pnl_series,
+        "signal_count": signal_series,
+    }
 
 
 def _latest_day_metrics(path: Path) -> dict[str, Any]:
@@ -205,6 +244,12 @@ def create_app() -> FastAPI:
             },
         }
 
+    @app.get("/api/charts")
+    def charts() -> dict[str, Any]:
+        data = _chart_data()
+        data["ts_utc"] = _now_iso()
+        return data
+
     @app.get("/api/raw/{name}")
     def raw_file(name: str) -> JSONResponse:
         mapping = {
@@ -246,7 +291,128 @@ def create_app() -> FastAPI:
                 "/api/contracts",
                 "/api/governance/events",
                 "/api/monitoring",
+                "/api/charts",
+                "/api/ops/status",
+                "/api/ops/restart",
+                "/api/ops/shutdown",
+                "/api/ops/start-scheduler",
             ]
+        }
+
+    # ── Service management ────────────────────────────────────
+
+    _SCHEDULER_LABEL = "com.ericjellerson.kalshi-weather.scheduler"
+    _DASHBOARD_LABEL = "com.ericjellerson.kalshi-weather.dashboard"
+    _SCHEDULER_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{_SCHEDULER_LABEL}.plist"
+
+    def _gui_prefix() -> str:
+        return f"gui/{os.getuid()}"
+
+    def _service_loaded(label: str) -> bool:
+        try:
+            r = subprocess.run(
+                ["launchctl", "print", f"{_gui_prefix()}/{label}"],
+                capture_output=True, timeout=5,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    @app.get("/api/ops/status")
+    def ops_status() -> dict[str, Any]:
+        return {
+            "scheduler": "loaded" if _service_loaded(_SCHEDULER_LABEL) else "stopped",
+            "dashboard": "loaded" if _service_loaded(_DASHBOARD_LABEL) else "stopped",
+        }
+
+    @app.post("/api/ops/restart")
+    def ops_restart() -> dict[str, Any]:
+        """Restart both scheduler and dashboard via kickstart -k.
+
+        The dashboard kickstart is delayed 1s so this response can be sent
+        before the process is killed.
+        """
+        prefix = _gui_prefix()
+        results: dict[str, str] = {}
+
+        # Restart scheduler immediately
+        try:
+            subprocess.run(
+                ["launchctl", "kickstart", "-k", f"{prefix}/{_SCHEDULER_LABEL}"],
+                capture_output=True, timeout=10,
+            )
+            results["scheduler"] = "restarted"
+        except Exception as exc:
+            results["scheduler"] = f"error: {exc}"
+
+        # Restart dashboard with a short delay so the HTTP response lands first
+        try:
+            subprocess.Popen(
+                ["bash", "-c", f"sleep 1 && launchctl kickstart -k '{prefix}/{_DASHBOARD_LABEL}'"],
+            )
+            results["dashboard"] = "restarting"
+        except Exception as exc:
+            results["dashboard"] = f"error: {exc}"
+
+        return {"ok": True, "action": "restart", "results": results}
+
+    @app.post("/api/ops/shutdown")
+    def ops_shutdown() -> dict[str, Any]:
+        """Stop the scheduler (bootout) and restart the dashboard.
+
+        The dashboard restart is delayed so the response can be sent first.
+        """
+        prefix = _gui_prefix()
+        results: dict[str, str] = {}
+
+        # Stop scheduler (fully unload from launchd)
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", f"{prefix}/{_SCHEDULER_LABEL}"],
+                capture_output=True, timeout=10,
+            )
+            results["scheduler"] = "stopped"
+        except Exception as exc:
+            results["scheduler"] = f"error: {exc}"
+
+        # Restart dashboard so it picks up any code changes
+        try:
+            subprocess.Popen(
+                ["bash", "-c", f"sleep 1 && launchctl kickstart -k '{prefix}/{_DASHBOARD_LABEL}'"],
+            )
+            results["dashboard"] = "restarting"
+        except Exception as exc:
+            results["dashboard"] = f"error: {exc}"
+
+        return {"ok": True, "action": "shutdown", "results": results}
+
+    @app.post("/api/ops/start-scheduler")
+    def ops_start_scheduler() -> dict[str, Any]:
+        """Re-bootstrap and start the scheduler after a shutdown."""
+        prefix = _gui_prefix()
+        plist = str(_SCHEDULER_PLIST)
+
+        # Bootstrap (re-load the service definition)
+        subprocess.run(
+            ["launchctl", "bootstrap", prefix, plist],
+            capture_output=True, timeout=10,
+        )
+        # Enable
+        subprocess.run(
+            ["launchctl", "enable", f"{prefix}/{_SCHEDULER_LABEL}"],
+            capture_output=True, timeout=10,
+        )
+        # Kickstart
+        r = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"{prefix}/{_SCHEDULER_LABEL}"],
+            capture_output=True, timeout=10,
+        )
+
+        ok = r.returncode == 0
+        return {
+            "ok": ok,
+            "action": "start-scheduler",
+            "message": "Scheduler started" if ok else f"Failed (rc={r.returncode})",
         }
 
     return app

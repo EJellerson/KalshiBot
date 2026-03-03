@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kalshi Weather Ops Dashboard</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⛅</text></svg>" />
     <style>
       :root {
         --bg0: #091018;
@@ -16,6 +17,7 @@
         --good: #43c78e;
         --bad: #ef6b6b;
         --warn: #e7bc57;
+        --blue: #5ba8d9;
       }
       * {
         box-sizing: border-box;
@@ -76,6 +78,10 @@
         border-radius: 12px;
         padding: 12px;
       }
+      .card.live-active {
+        border-color: var(--good);
+        box-shadow: 0 0 12px rgba(67, 199, 142, 0.15);
+      }
       .card h3 {
         margin: 0 0 8px;
         color: var(--muted);
@@ -99,6 +105,9 @@
       .warn {
         color: var(--warn);
       }
+      .blue {
+        color: var(--blue);
+      }
       .sub {
         margin-top: 5px;
         color: var(--muted);
@@ -111,6 +120,10 @@
         margin: 0 0 9px;
         color: var(--muted);
         font-size: 16px;
+      }
+      .table-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
       }
       table {
         width: 100%;
@@ -126,6 +139,7 @@
         border-bottom: 1px solid #2a4a66;
         font-size: 12px;
         vertical-align: top;
+        white-space: nowrap;
       }
       th {
         background: #213c55;
@@ -133,31 +147,59 @@
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.6px;
+        cursor: pointer;
+        user-select: none;
+      }
+      th:hover {
+        background: #2a4d6a;
+      }
+      th .sort-arrow {
+        margin-left: 4px;
+        font-size: 10px;
+        opacity: 0.6;
       }
       tr:last-child td {
         border-bottom: none;
       }
-      .two {
-        display: grid;
-        gap: 12px;
-        grid-template-columns: 1fr 1fr;
+      @media (max-width: 1020px) {
+        .kpis { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+      }
+      .progress-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       .progress {
-        width: 170px;
+        width: 130px;
         height: 8px;
         border-radius: 999px;
         border: 1px solid #3b5f7c;
         background: #0f1e2b;
         overflow: hidden;
+        flex-shrink: 0;
       }
       .bar {
         height: 100%;
+        min-width: 2px;
         background: linear-gradient(90deg, #49b37d, #7fd9af);
       }
-      .err {
-        margin-top: 10px;
+      .progress-label {
+        font-size: 11px;
+        color: var(--muted);
+        font-family: "IBM Plex Mono", "Menlo", monospace;
+        min-width: 48px;
+      }
+      .err-banner {
+        padding: 10px 14px;
+        border-radius: 10px;
+        margin-bottom: 12px;
+        background: rgba(239, 107, 107, 0.15);
+        border: 1px solid rgba(239, 107, 107, 0.6);
         color: var(--bad);
         font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       .alerts {
         margin-top: 12px;
@@ -168,6 +210,9 @@
         margin-bottom: 8px;
         border: 1px solid transparent;
         font-size: 13px;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
       }
       .sev-critical {
         background: rgba(239, 107, 107, 0.12);
@@ -181,6 +226,28 @@
         background: rgba(67, 199, 142, 0.1);
         border-color: rgba(67, 199, 142, 0.45);
       }
+      .sev-badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        flex-shrink: 0;
+      }
+      .sev-badge.critical {
+        background: rgba(239, 107, 107, 0.25);
+        color: var(--bad);
+      }
+      .sev-badge.warn {
+        background: rgba(231, 188, 87, 0.25);
+        color: var(--warn);
+      }
+      .sev-badge.info {
+        background: rgba(67, 199, 142, 0.2);
+        color: var(--good);
+      }
       .status-pill {
         display: inline-block;
         margin-left: 7px;
@@ -192,10 +259,225 @@
       .mono {
         font-family: "IBM Plex Mono", "Menlo", monospace;
       }
-      @media (max-width: 1020px) {
-        .two {
-          grid-template-columns: 1fr;
-        }
+      .btn-refresh {
+        background: none;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: border-color 0.15s, color 0.15s;
+      }
+      .btn-refresh:hover {
+        border-color: var(--blue);
+        color: var(--text);
+      }
+      .delta {
+        font-size: 12px;
+        margin-left: 6px;
+        font-weight: 400;
+      }
+      .delta.up {
+        color: var(--good);
+      }
+      .delta.down {
+        color: var(--bad);
+      }
+      .delta.flat {
+        color: var(--muted);
+      }
+      .loading-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 60vh;
+        gap: 16px;
+      }
+      .spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid var(--line);
+        border-top-color: var(--blue);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      .btn-ops {
+        background: none;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        padding: 5px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
+      }
+      .btn-ops:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .btn-ops:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .btn-ops.danger {
+        border-color: rgba(239, 107, 107, 0.4);
+        color: var(--bad);
+      }
+      .btn-ops.danger:hover {
+        border-color: var(--bad);
+        background: rgba(239, 107, 107, 0.1);
+      }
+      .btn-ops.primary {
+        border-color: rgba(67, 199, 142, 0.4);
+        color: var(--good);
+      }
+      .btn-ops.primary:hover {
+        border-color: var(--good);
+        background: rgba(67, 199, 142, 0.1);
+      }
+      .ops-controls {
+        display: flex;
+        gap: 8px;
+        margin-top: 6px;
+      }
+      .confirm-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.65);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+      }
+      .confirm-dialog {
+        background: linear-gradient(165deg, var(--panel), var(--bg0));
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 24px;
+        max-width: 420px;
+        width: 90%;
+      }
+      .confirm-dialog h3 {
+        margin: 0 0 10px;
+        font-size: 18px;
+        color: var(--text);
+      }
+      .confirm-dialog p {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .confirm-dialog .actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+      .reconnecting-banner {
+        padding: 12px 16px;
+        border-radius: 10px;
+        margin-bottom: 12px;
+        background: rgba(91, 168, 217, 0.12);
+        border: 1px solid rgba(91, 168, 217, 0.5);
+        color: var(--blue);
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .reconnecting-banner .spinner {
+        width: 16px;
+        height: 16px;
+        border-width: 2px;
+        flex-shrink: 0;
+      }
+      .scheduler-banner {
+        padding: 12px 16px;
+        border-radius: 10px;
+        margin-bottom: 12px;
+        background: rgba(231, 188, 87, 0.12);
+        border: 1px solid rgba(231, 188, 87, 0.5);
+        color: var(--warn);
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .tab-bar {
+        display: flex;
+        gap: 2px;
+        margin-bottom: 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .tab-btn {
+        background: none;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: var(--muted);
+        padding: 8px 18px;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
+        letter-spacing: 0.3px;
+      }
+      .tab-btn:hover {
+        color: var(--text);
+      }
+      .tab-btn.active {
+        color: var(--text);
+        border-bottom-color: var(--blue);
+        font-weight: 600;
+      }
+      .chart-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 14px;
+      }
+      .chart-grid .full-width {
+        grid-column: 1 / -1;
+      }
+      @media (max-width: 800px) {
+        .chart-grid { grid-template-columns: 1fr; }
+      }
+      .chart-card {
+        background: linear-gradient(165deg, var(--panel), var(--panel2));
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px;
+        min-height: 260px;
+        display: flex;
+        flex-direction: column;
+      }
+      .chart-card h3 {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+      }
+      .chart-wrap {
+        flex: 1;
+        position: relative;
+        min-height: 200px;
+      }
+      .chart-empty {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted);
+        font-size: 14px;
+        font-style: italic;
       }
     </style>
   </head>
@@ -205,39 +487,167 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/chart.js@4/dist/chart.umd.min.js"></script>
     <script type="text/babel">
-      const { useEffect, useState } = React;
+      const { useEffect, useState, useRef, useMemo, useCallback } = React;
 
+      /* ── Formatters ─────────────────────────────────────────── */
       const money = (x) => Number(x || 0).toLocaleString(undefined, { style: "currency", currency: "USD" });
-      const pct = (x) => `${(Number(x || 0) * 100).toFixed(2)}%`;
+      const pct = (x) => {
+        const v = Number(x || 0) * 100;
+        if (v === 0) return "0%";
+        if (v === 100) return "100%";
+        return `${v.toFixed(1)}%`;
+      };
       const age = (mins) => (mins === null || mins === undefined || Number.isNaN(Number(mins)) ? "-" : `${Number(mins).toFixed(1)}m`);
       const sevClass = (severity) => `sev-${(severity || "info").toLowerCase()}`;
 
+      const COLUMN_LABELS = {
+        generated_at_utc: "Generated At",
+        p_fair: "Fair Value",
+        p_mkt: "Mkt Price",
+        ev_cents: "EV \u00a2",
+        min_ev_cents: "Min EV \u00a2",
+        age_minutes: "Age",
+        max_age: "Max Age",
+        latest_file: "Latest File",
+        obs_date_local: "Date",
+        forecast_rows: "Forecasts",
+        observation_rows: "Observations",
+        skipped_contracts: "Skipped",
+        days_remaining: "Days Left",
+        missing_pct: "Missing %",
+        obs_window: "Obs (Window)",
+        obs_total: "Obs (Total)",
+        missing_window: "Missing Days",
+        ticker: "Ticker",
+        city: "City",
+        side: "Side",
+        stream: "Stream",
+        files: "Files",
+        rows: "Rows",
+        stale: "Stale",
+        event: "Event",
+        ts: "Timestamp",
+        reason: "Reason",
+        signals: "Signals",
+        model_id: "Model",
+        days: "Days",
+        entry_price: "Entry",
+        current_price: "Current",
+        unrealized_pnl: "Unrealized P&L",
+        qty: "Qty",
+        bid: "Bid",
+        ask: "Ask",
+        spread: "Spread",
+      };
+
+      function fmtLabel(col) {
+        return COLUMN_LABELS[col] || col.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      }
+
+      function fmtCell(value, col) {
+        if (value === null || value === undefined || value === "") return "-";
+        if (typeof value === "object") return JSON.stringify(value);
+        if (typeof value === "number") {
+          if (col && (col.includes("pct") || col.includes("coverage"))) return pct(value);
+          if (col && (col === "p_fair" || col === "p_mkt")) return value.toFixed(4);
+          if (col && (col.includes("cents") || col === "ev_cents" || col === "min_ev_cents")) return value.toFixed(1);
+          if (col && col.includes("price")) return value.toFixed(4);
+          if (Number.isInteger(value)) return String(value);
+          return value.toFixed(2);
+        }
+        return String(value);
+      }
+
+      /* ── Fetch helper ───────────────────────────────────────── */
       async function getJSON(url) {
         const r = await fetch(url);
         if (!r.ok) throw new Error(`${url} -> ${r.status}`);
         return await r.json();
       }
 
-      function DataTable({ rows, preferredCols }) {
-        if (!rows || rows.length === 0) return <div className="meta">No rows</div>;
+      /* ── Delta indicator ────────────────────────────────────── */
+      function Delta({ current, previous }) {
+        if (previous === null || previous === undefined) return null;
+        const diff = current - previous;
+        if (diff === 0) return null;
+        const cls = diff > 0 ? "up" : "down";
+        const arrow = diff > 0 ? "\u25B2" : "\u25BC";
+        const label = typeof current === "number" && Math.abs(current) >= 1
+          ? (diff > 0 ? "+" : "") + diff.toFixed(2)
+          : (diff > 0 ? "+" : "") + diff.toFixed(4);
+        return <span className={`delta ${cls}`}>{arrow} {label}</span>;
+      }
+
+      /* ── Sortable DataTable ─────────────────────────────────── */
+      function DataTable({ rows, preferredCols, emptyMessage, colorRules }) {
+        const [sortCol, setSortCol] = useState(null);
+        const [sortDir, setSortDir] = useState("asc");
+
+        if (!rows || rows.length === 0) return <div className="meta">{emptyMessage || "No data"}</div>;
         const cols = preferredCols && preferredCols.length > 0 ? preferredCols : Object.keys(rows[0] || {});
+
+        const sorted = useMemo(() => {
+          if (!sortCol) return rows;
+          return [...rows].sort((a, b) => {
+            const va = a[sortCol], vb = b[sortCol];
+            if (va === vb) return 0;
+            if (va === null || va === undefined) return 1;
+            if (vb === null || vb === undefined) return -1;
+            const cmp = typeof va === "number" && typeof vb === "number"
+              ? va - vb
+              : String(va).localeCompare(String(vb));
+            return sortDir === "asc" ? cmp : -cmp;
+          });
+        }, [rows, sortCol, sortDir]);
+
+        const handleSort = (col) => {
+          if (sortCol === col) {
+            setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+          } else {
+            setSortCol(col);
+            setSortDir("asc");
+          }
+        };
+
+        const cellClass = (value, col) => {
+          if (!colorRules) return "";
+          const rule = colorRules[col];
+          if (!rule) return "";
+          return rule(value) || "";
+        };
+
         return (
-          <table>
-            <thead>
-              <tr>{cols.map((c) => <th key={c}>{c}</th>)}</tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={i}>
-                  {cols.map((c) => <td key={`${i}_${c}`}>{typeof row[c] === "object" ? JSON.stringify(row[c]) : String(row[c] ?? "")}</td>)}
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  {cols.map((c) => (
+                    <th key={c} onClick={() => handleSort(c)}>
+                      {fmtLabel(c)}
+                      {sortCol === c && <span className="sort-arrow">{sortDir === "asc" ? "\u25B2" : "\u25BC"}</span>}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {sorted.map((row, i) => (
+                  <tr key={i}>
+                    {cols.map((c) => (
+                      <td key={`${i}_${c}`} className={cellClass(row[c], c)}>
+                        {fmtCell(row[c], c)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         );
       }
 
+      /* ── Alerts Panel ───────────────────────────────────────── */
       function AlertsPanel({ alerts }) {
         if (!alerts || alerts.length === 0) {
           return <div className="alert sev-info">No active alerts. Pipeline appears healthy.</div>;
@@ -246,13 +656,120 @@
           <div className="alerts">
             {alerts.map((a, idx) => (
               <div key={idx} className={`alert ${sevClass(a.severity)}`}>
-                <span className="mono">{a.code}</span>: {a.message}
+                <span className={`sev-badge ${(a.severity || "info").toLowerCase()}`}>{(a.severity || "info").toUpperCase()}</span>
+                <span><span className="mono">{a.code}</span>: {a.message}</span>
               </div>
             ))}
           </div>
         );
       }
 
+      /* ── Chart.js wrapper ───────────────────────────────────── */
+      function ChartCard({ title, type, data, options, emptyText, className }) {
+        const canvasRef = useRef(null);
+        const chartRef = useRef(null);
+        const isEmpty = !data || !data.labels || data.labels.length === 0;
+
+        useEffect(() => {
+          if (isEmpty) {
+            if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+            return;
+          }
+          const ctx = canvasRef.current;
+          if (!ctx) return;
+
+          if (chartRef.current) {
+            chartRef.current.data = data;
+            chartRef.current.update("none");
+            return;
+          }
+
+          chartRef.current = new Chart(ctx, { type, data, options });
+        }, [data, type, isEmpty]);
+
+        useEffect(() => {
+          return () => { if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; } };
+        }, []);
+
+        return (
+          <div className={`chart-card ${className || ""}`}>
+            <h3>{title}</h3>
+            <div className="chart-wrap">
+              {isEmpty
+                ? <div className="chart-empty">{emptyText || "No data yet"}</div>
+                : <canvas ref={canvasRef} />}
+            </div>
+          </div>
+        );
+      }
+
+      const CHART_DEFAULTS = {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 400 },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: "#14283c",
+            titleColor: "#e8f3fb",
+            bodyColor: "#e8f3fb",
+            borderColor: "#2a4c6b",
+            borderWidth: 1,
+            cornerRadius: 8,
+            padding: 10,
+          },
+        },
+        scales: {
+          x: {
+            ticks: { color: "#9cb6cc", font: { size: 11 } },
+            grid: { color: "rgba(42, 76, 107, 0.4)" },
+          },
+          y: {
+            ticks: { color: "#9cb6cc", font: { size: 11 } },
+            grid: { color: "rgba(42, 76, 107, 0.4)" },
+          },
+        },
+      };
+
+      function equityCurveOptions() {
+        return {
+          ...CHART_DEFAULTS,
+          scales: {
+            ...CHART_DEFAULTS.scales,
+            y: { ...CHART_DEFAULTS.scales.y, ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: (v) => "$" + v.toLocaleString() } },
+          },
+          plugins: {
+            ...CHART_DEFAULTS.plugins,
+            tooltip: { ...CHART_DEFAULTS.plugins.tooltip, callbacks: { label: (ctx) => "Equity: $" + ctx.parsed.y.toLocaleString() } },
+          },
+        };
+      }
+
+      function dailyPnlOptions() {
+        return {
+          ...CHART_DEFAULTS,
+          scales: {
+            ...CHART_DEFAULTS.scales,
+            y: { ...CHART_DEFAULTS.scales.y, ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: (v) => (v >= 0 ? "+" : "") + "$" + v.toFixed(2) } },
+          },
+          plugins: {
+            ...CHART_DEFAULTS.plugins,
+            tooltip: { ...CHART_DEFAULTS.plugins.tooltip, callbacks: { label: (ctx) => (ctx.parsed.y >= 0 ? "+" : "") + "$" + ctx.parsed.y.toFixed(2) } },
+          },
+        };
+      }
+
+      function signalCountOptions() {
+        return {
+          ...CHART_DEFAULTS,
+          scales: {
+            ...CHART_DEFAULTS.scales,
+            y: { ...CHART_DEFAULTS.scales.y, ticks: { ...CHART_DEFAULTS.scales.y.ticks, stepSize: 1, precision: 0 } },
+          },
+        };
+      }
+
+      /* ── Train Table ────────────────────────────────────────── */
       function TrainTable({ snapshot }) {
         const cityStats = snapshot?.train_gate?.city_stats || {};
         const daysRemaining = snapshot?.train_gate?.days_remaining_by_city || {};
@@ -276,72 +793,280 @@
           .sort((a, b) => b.days_remaining - a.days_remaining);
 
         return (
-          <table>
-            <thead>
-              <tr>
-                <th>City</th>
-                <th>Obs (Window)</th>
-                <th>Obs (Total)</th>
-                <th>Missing Days</th>
-                <th>Missing %</th>
-                <th>Days Remaining</th>
-                <th>Coverage</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.city}>
-                  <td>{r.city}</td>
-                  <td>{r.obs_window}</td>
-                  <td>{r.obs_total}</td>
-                  <td>{r.missing_window}</td>
-                  <td>{pct(r.missing_pct)}</td>
-                  <td className={r.days_remaining > 0 ? "warn" : "good"}>{r.days_remaining}</td>
-                  <td>
-                    <div className="progress">
-                      <div className="bar" style={{ width: `${Math.max(0, Math.min(100, r.coverage * 100))}%` }} />
-                    </div>
-                    <div className="sub">{pct(r.coverage)}</div>
-                  </td>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>City</th>
+                  <th>Obs (Window)</th>
+                  <th>Obs (Total)</th>
+                  <th>Missing Days</th>
+                  <th>Missing %</th>
+                  <th>Days Remaining</th>
+                  <th>Coverage</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.city}>
+                    <td>{r.city}</td>
+                    <td>{r.obs_window}</td>
+                    <td>{r.obs_total}</td>
+                    <td>{r.missing_window}</td>
+                    <td>{pct(r.missing_pct)}</td>
+                    <td className={r.days_remaining > 0 ? "warn" : "good"}>{r.days_remaining}</td>
+                    <td>
+                      <div className="progress-wrap">
+                        <div className="progress">
+                          <div className="bar" style={{ width: `${Math.max(0, Math.min(100, r.coverage * 100))}%` }} />
+                        </div>
+                        <span className="progress-label">{pct(r.coverage)}</span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         );
       }
 
+      /* ── Main App ───────────────────────────────────────────── */
       function App() {
         const [summary, setSummary] = useState(null);
         const [monitor, setMonitor] = useState(null);
         const [signals, setSignals] = useState([]);
         const [events, setEvents] = useState([]);
+        const [positions, setPositions] = useState([]);
+        const [quotes, setQuotes] = useState([]);
+        const [chartData, setChartData] = useState(null);
         const [err, setErr] = useState("");
         const [lastRefresh, setLastRefresh] = useState(null);
+        const [serverTs, setServerTs] = useState(null);
+        const prevSummary = useRef(null);
 
-        const refresh = async () => {
+        /* Service control state */
+        const [reconnecting, setReconnecting] = useState(false);
+        const [schedulerStopped, setSchedulerStopped] = useState(false);
+        const [confirmAction, setConfirmAction] = useState(null); // "restart" | "shutdown" | null
+        const [opsMsg, setOpsMsg] = useState("");
+        const intervalRef = useRef(null);
+
+        /* Tab state with URL hash persistence */
+        const TABS = ["overview", "pipeline", "trading", "governance"];
+        const getTabFromHash = () => {
+          const h = window.location.hash.slice(1);
+          return TABS.includes(h) ? h : "overview";
+        };
+        const [tab, setTabState] = useState(getTabFromHash);
+        const setTab = useCallback((t) => {
+          setTabState(t);
+          window.location.hash = t;
+        }, []);
+        useEffect(() => {
+          const onHash = () => setTabState(getTabFromHash());
+          window.addEventListener("hashchange", onHash);
+          return () => window.removeEventListener("hashchange", onHash);
+        }, []);
+
+        const refresh = useCallback(async () => {
           try {
-            const [s, m, sig, ev] = await Promise.all([
+            const [s, m, sig, ev, pos, qt, ch] = await Promise.all([
               getJSON("/api/summary"),
               getJSON("/api/monitoring"),
               getJSON("/api/signals?limit=30"),
               getJSON("/api/governance/events?limit=40"),
+              getJSON("/api/positions?mode=paper&status=open&limit=50"),
+              getJSON("/api/quotes?limit=30"),
+              getJSON("/api/charts"),
             ]);
+            prevSummary.current = summary;
             setSummary(s);
             setMonitor(m);
             setSignals(sig.rows || []);
             setEvents(ev.rows || []);
+            setPositions(pos.rows || []);
+            setQuotes(qt.rows || []);
+            setChartData(ch);
             setErr("");
             setLastRefresh(new Date().toLocaleTimeString());
+            setServerTs(s.ts_utc || null);
           } catch (e) {
             setErr(e.message || "refresh failed");
           }
-        };
+        }, [summary]);
 
         useEffect(() => {
           refresh();
-          const id = setInterval(refresh, 15000);
-          return () => clearInterval(id);
+          intervalRef.current = setInterval(refresh, 15000);
+          return () => clearInterval(intervalRef.current);
         }, []);
+
+        /* Check scheduler status on load and after reconnect */
+        const checkSchedulerStatus = useCallback(async () => {
+          try {
+            const status = await getJSON("/api/ops/status");
+            setSchedulerStopped(status.scheduler === "stopped");
+          } catch {
+            // dashboard might be down, ignore
+          }
+        }, []);
+
+        useEffect(() => {
+          checkSchedulerStatus();
+        }, []);
+
+        /* Poll /health until dashboard comes back after restart */
+        const waitForReconnect = useCallback((onReconnected) => {
+          setReconnecting(true);
+          clearInterval(intervalRef.current);
+          let attempts = 0;
+          const poll = setInterval(async () => {
+            attempts++;
+            try {
+              await getJSON("/health");
+              clearInterval(poll);
+              setReconnecting(false);
+              if (onReconnected) onReconnected();
+              await refresh();
+              await checkSchedulerStatus();
+              intervalRef.current = setInterval(refresh, 15000);
+            } catch {
+              if (attempts > 60) {
+                clearInterval(poll);
+                setReconnecting(false);
+                setErr("Dashboard did not come back after 60s. Check services manually.");
+              }
+            }
+          }, 1000);
+        }, [refresh, checkSchedulerStatus]);
+
+        /* Service actions */
+        const doRestart = useCallback(async () => {
+          setConfirmAction(null);
+          setOpsMsg("Restarting both services...");
+          try {
+            await fetch("/api/ops/restart", { method: "POST" });
+          } catch {
+            // Expected — the dashboard process gets killed
+          }
+          setOpsMsg("");
+          waitForReconnect();
+        }, [waitForReconnect]);
+
+        const doShutdown = useCallback(async () => {
+          setConfirmAction(null);
+          setOpsMsg("Shutting down scheduler, restarting dashboard...");
+          try {
+            await fetch("/api/ops/shutdown", { method: "POST" });
+          } catch {
+            // Expected — dashboard restarts
+          }
+          setOpsMsg("");
+          waitForReconnect(() => {
+            setSchedulerStopped(true);
+          });
+        }, [waitForReconnect]);
+
+        const doStartScheduler = useCallback(async () => {
+          setOpsMsg("Starting scheduler...");
+          try {
+            const resp = await fetch("/api/ops/start-scheduler", { method: "POST" });
+            const r = await resp.json();
+            if (r.ok) {
+              setSchedulerStopped(false);
+              setOpsMsg("");
+              refresh();
+            } else {
+              setOpsMsg(`Failed: ${r.message || "unknown error"}`);
+              setTimeout(() => setOpsMsg(""), 5000);
+            }
+          } catch (e) {
+            setOpsMsg(`Error: ${e.message}`);
+            setTimeout(() => setOpsMsg(""), 5000);
+          }
+        }, [refresh]);
+
+        /* Dynamic page title */
+        useEffect(() => {
+          if (!monitor) return;
+          const alerts = monitor?.alerts?.alerts || [];
+          const status = monitor?.alerts?.status || "ok";
+          if (alerts.length === 0) {
+            document.title = "[OK] Kalshi Weather Ops";
+          } else {
+            const counts = monitor?.alerts?.counts || {};
+            const parts = [];
+            if (counts.critical) parts.push(`${counts.critical} CRIT`);
+            if (counts.warn) parts.push(`${counts.warn} WARN`);
+            document.title = `[${parts.join(", ") || status.toUpperCase()}] Kalshi Weather Ops`;
+          }
+        }, [monitor]);
+
+        /* ── Chart data transforms (must be before early return for hooks rules) */
+        const equityChartData = useMemo(() => {
+          const series = chartData?.equity_curve || [];
+          if (series.length === 0) return { labels: [], datasets: [] };
+          return {
+            labels: series.map((d) => d.date),
+            datasets: [{
+              label: "Equity",
+              data: series.map((d) => d.equity),
+              borderColor: "#5ba8d9",
+              backgroundColor: "rgba(91, 168, 217, 0.15)",
+              fill: true,
+              tension: 0.3,
+              pointRadius: series.length > 30 ? 0 : 3,
+              pointHoverRadius: 5,
+              borderWidth: 2,
+            }],
+          };
+        }, [chartData]);
+
+        const pnlChartData = useMemo(() => {
+          const series = chartData?.daily_pnl || [];
+          if (series.length === 0) return { labels: [], datasets: [] };
+          return {
+            labels: series.map((d) => d.date),
+            datasets: [{
+              label: "P&L",
+              data: series.map((d) => d.pnl),
+              backgroundColor: series.map((d) => d.pnl >= 0 ? "rgba(67, 199, 142, 0.75)" : "rgba(239, 107, 107, 0.75)"),
+              borderColor: series.map((d) => d.pnl >= 0 ? "#43c78e" : "#ef6b6b"),
+              borderWidth: 1,
+              borderRadius: 3,
+            }],
+          };
+        }, [chartData]);
+
+        const signalChartData = useMemo(() => {
+          const series = chartData?.signal_count || [];
+          if (series.length === 0) return { labels: [], datasets: [] };
+          return {
+            labels: series.map((d) => d.date),
+            datasets: [{
+              label: "Signals",
+              data: series.map((d) => d.count),
+              backgroundColor: "rgba(91, 168, 217, 0.6)",
+              borderColor: "#5ba8d9",
+              borderWidth: 1,
+              borderRadius: 3,
+            }],
+          };
+        }, [chartData]);
+
+        /* Loading state */
+        if (!summary || !monitor) {
+          return (
+            <div className="wrap">
+              <div className="loading-wrap">
+                <div className="spinner" />
+                <div className="meta">{reconnecting ? "Reconnecting to dashboard..." : "Connecting to pipeline..."}</div>
+                {err && <div className="err-banner">Failed to connect: {err}</div>}
+              </div>
+            </div>
+          );
+        }
 
         const inv = monitor?.inventory || {};
         const todayRows = inv.today_rows || {};
@@ -355,6 +1080,16 @@
         const eventAge = monitor?.events?.minutes_since_by_event || {};
         const freshness = inv.freshness_threshold_minutes || {};
         const streamAges = inv.stream_age_minutes || {};
+        const prev = prevSummary.current;
+
+        const streamColorRules = {
+          stale: (v) => (v === "YES" ? "bad" : v === "NO" ? "good" : ""),
+          age_minutes: (v) => {
+            if (!v || v === "-") return "";
+            const num = parseFloat(v);
+            return num > 30 ? "warn" : "";
+          },
+        };
 
         const streamRows = ["forecasts", "observations", "quotes", "signals"].map((stream) => ({
           stream,
@@ -371,8 +1106,11 @@
           age_minutes: age(mins),
         }));
 
+        const paperMetrics = summary?.paper?.latest_metrics?.metrics || {};
+
         return (
           <div className="wrap">
+            {/* ── Header ─────────────────────────────────── */}
             <div className="head">
               <div>
                 <h1>Kalshi Weather Ops Dashboard</h1>
@@ -385,129 +1123,315 @@
                   <span className={`chip ${alertStatus === "critical" ? "bad" : alertStatus === "warn" ? "warn" : "good"}`}>ops: {alertStatus.toUpperCase()}</span>
                 </div>
               </div>
-              <div className="meta">
-                Last refresh: {lastRefresh || "loading..."}
-                <br />
-                Champion: {summary?.registry?.champion_global || "none"}
+              <div className="meta" style={{ textAlign: "right" }}>
+                <div>
+                  Last refresh: {lastRefresh || "loading..."}
+                  {" "}
+                  <button className="btn-refresh" onClick={refresh} title="Force refresh now">Refresh</button>
+                </div>
+                <div style={{ marginTop: "4px" }}>
+                  Server: {serverTs ? new Date(serverTs).toLocaleTimeString() : "-"}
+                </div>
+                <div style={{ marginTop: "2px" }}>
+                  Champion: {summary?.registry?.champion_global || "none"}
+                </div>
+                <div className="ops-controls">
+                  <button
+                    className="btn-ops"
+                    onClick={() => setConfirmAction("restart")}
+                    disabled={reconnecting}
+                    title="Restart both scheduler and dashboard (kickstart -k)"
+                  >Restart</button>
+                  <button
+                    className="btn-ops danger"
+                    onClick={() => setConfirmAction("shutdown")}
+                    disabled={reconnecting}
+                    title="Stop scheduler, restart dashboard"
+                  >Shut Down</button>
+                </div>
               </div>
             </div>
 
-            <div className="section">
-              <h2>Operational Alerts</h2>
-              <AlertsPanel alerts={alerts} />
+            {/* ── Confirmation dialog ──────────────────────── */}
+            {confirmAction && (
+              <div className="confirm-overlay" onClick={() => setConfirmAction(null)}>
+                <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+                  <h3>{confirmAction === "restart" ? "Restart Services?" : "Shut Down Scheduler?"}</h3>
+                  <p>
+                    {confirmAction === "restart"
+                      ? "This will restart both the scheduler and dashboard. The page will briefly disconnect while the dashboard restarts."
+                      : "This will stop the scheduler and restart the dashboard. You\u2019ll be able to start the scheduler again from the UI."}
+                  </p>
+                  <div className="actions">
+                    <button className="btn-ops" onClick={() => setConfirmAction(null)}>Cancel</button>
+                    <button
+                      className={`btn-ops ${confirmAction === "shutdown" ? "danger" : "primary"}`}
+                      onClick={confirmAction === "restart" ? doRestart : doShutdown}
+                    >
+                      {confirmAction === "restart" ? "Restart" : "Shut Down"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Reconnecting banner ────────────────────── */}
+            {reconnecting && (
+              <div className="reconnecting-banner">
+                <div className="spinner" />
+                <span>Dashboard is restarting... reconnecting automatically</span>
+              </div>
+            )}
+
+            {/* ── Scheduler stopped banner ───────────────── */}
+            {schedulerStopped && !reconnecting && (
+              <div className="scheduler-banner">
+                <span>Scheduler is stopped.</span>
+                <button className="btn-ops primary" onClick={doStartScheduler} disabled={!!opsMsg}>
+                  {opsMsg || "Start Scheduler"}
+                </button>
+              </div>
+            )}
+
+            {/* ── Ops action message ─────────────────────── */}
+            {opsMsg && !reconnecting && !schedulerStopped && (
+              <div className="reconnecting-banner">
+                <div className="spinner" />
+                <span>{opsMsg}</span>
+              </div>
+            )}
+
+            {/* ── Error banner (top) ─────────────────────── */}
+            {err && (
+              <div className="err-banner">
+                <span style={{ fontSize: "16px" }}>&#9888;</span>
+                <span>API Error: {err}</span>
+                <button className="btn-refresh" onClick={refresh} style={{ marginLeft: "auto" }}>Retry</button>
+              </div>
+            )}
+
+            {/* ── Tab Bar ──────────────────────────────── */}
+            <div className="tab-bar">
+              {TABS.map((t) => (
+                <button
+                  key={t}
+                  className={`tab-btn ${tab === t ? "active" : ""}`}
+                  onClick={() => setTab(t)}
+                >
+                  {t.charAt(0).toUpperCase() + t.slice(1)}
+                </button>
+              ))}
             </div>
 
-            <div className="grid kpis">
-              <div className="card">
-                <h3>Train Gate</h3>
-                <div className={`kpi ${gate.pass ? "good" : "warn"}`}>{gate.pass ? "PASS" : "BLOCKED"}</div>
-                <div className="sub">ETA (local): {train.estimated_ready_date_local || "-"}</div>
-              </div>
-              <div className="card">
-                <h3>Days Remaining</h3>
-                <div className="kpi">{train.max_days_remaining ?? "-"}</div>
-                <div className="sub">max across tracked cities</div>
-              </div>
-              <div className="card">
-                <h3>Ops Alerts</h3>
-                <div className={`kpi sm ${alertStatus === "critical" ? "bad" : alertStatus === "warn" ? "warn" : "good"}`}>{alerts.length}</div>
-                <div className="sub">critical: {alertCounts.critical || 0}, warn: {alertCounts.warn || 0}</div>
-              </div>
-              <div className="card">
-                <h3>Contracts Active</h3>
-                <div className={`kpi ${Number(inv.contracts_active || 0) > 0 ? "good" : "bad"}`}>{inv.contracts_active ?? 0}</div>
-                <div className="sub">contract map age: {age(inv.contracts_age_minutes)}</div>
-              </div>
-              <div className="card">
-                <h3>Today Forecast Rows</h3>
-                <div className="kpi">{todayRows.forecasts ?? 0}</div>
-                <div className="sub">total: {inv.forecasts?.rows ?? 0}</div>
-              </div>
-              <div className="card">
-                <h3>Today Observation Rows</h3>
-                <div className="kpi">{todayRows.observations ?? 0}</div>
-                <div className="sub">total: {inv.observations?.rows ?? 0}</div>
-              </div>
-              <div className="card">
-                <h3>Today Signal Rows</h3>
-                <div className="kpi">{todayRows.signals ?? 0}</div>
-                <div className="sub">quotes today: {todayRows.quotes ?? 0}</div>
-              </div>
-              <div className="card">
-                <h3>Paper Equity</h3>
-                <div className="kpi sm">{money(summary?.paper?.equity)}</div>
-                <div className="sub">open: {summary?.paper?.open_positions ?? 0}, closed: {summary?.paper?.closed_positions ?? 0}</div>
-              </div>
-            </div>
+            {/* ── Overview Tab ────────────────────────────── */}
+            {tab === "overview" && (
+              <>
+                <div className="section">
+                  <h2>Operational Alerts</h2>
+                  <AlertsPanel alerts={alerts} />
+                </div>
 
-            <div className="section">
-              <h2>Train Gate Progress By City</h2>
-              <TrainTable snapshot={monitor} />
-              {!gate.pass && Array.isArray(gate.reasons) && gate.reasons.length > 0 && (
-                <div className="sub" style={{ marginTop: "8px" }}>Reasons: {gate.reasons.join(" | ")}</div>
-              )}
-            </div>
+                {/* ── Charts ────────────────────────────────── */}
+                <div className="chart-grid">
+                  <ChartCard
+                    title="Paper Equity Curve"
+                    type="line"
+                    data={equityChartData}
+                    options={equityCurveOptions()}
+                    emptyText="Waiting for first trade..."
+                  />
+                  <ChartCard
+                    title="Daily P&L"
+                    type="bar"
+                    data={pnlChartData}
+                    options={dailyPnlOptions()}
+                    emptyText="Waiting for first trade..."
+                  />
+                  <ChartCard
+                    title="Signal Count by Day"
+                    type="bar"
+                    data={signalChartData}
+                    options={signalCountOptions()}
+                    emptyText="No signals generated yet"
+                    className="full-width"
+                  />
+                </div>
 
-            <div className="section two">
-              <div>
-                <h2>Pipeline Inventory and Freshness</h2>
-                <DataTable
-                  rows={streamRows}
-                  preferredCols={["stream", "files", "rows", "latest_file", "age_minutes", "max_age", "stale"]}
-                />
-              </div>
-              <div>
-                <h2>Scheduler Heartbeat (Event Recency)</h2>
-                <DataTable
-                  rows={heartbeatRows}
-                  preferredCols={["event", "age_minutes"]}
-                />
-              </div>
-            </div>
+                <div className="grid kpis">
+                  <div className="card">
+                    <h3>Train Gate</h3>
+                    <div className={`kpi ${gate.pass ? "good" : "warn"}`}>{gate.pass ? "PASS" : "BLOCKED"}</div>
+                    <div className="sub">ETA (local): {train.estimated_ready_date_local || "-"}</div>
+                  </div>
+                  <div className="card">
+                    <h3>Days Remaining</h3>
+                    <div className="kpi">
+                      {train.max_days_remaining ?? "-"}
+                      {prev && <Delta current={train.max_days_remaining ?? 0} previous={prev?.train_progress?.max_days_remaining} />}
+                    </div>
+                    <div className="sub">max across tracked cities</div>
+                  </div>
+                  <div className="card">
+                    <h3>Ops Alerts</h3>
+                    <div className={`kpi sm ${alertStatus === "critical" ? "bad" : alertStatus === "warn" ? "warn" : "good"}`}>{alerts.length}</div>
+                    <div className="sub">critical: {alertCounts.critical || 0}, warn: {alertCounts.warn || 0}</div>
+                  </div>
+                  <div className="card">
+                    <h3>Contracts Active</h3>
+                    <div className={`kpi ${Number(inv.contracts_active || 0) > 0 ? "good" : "bad"}`}>{inv.contracts_active ?? 0}</div>
+                    <div className="sub">contract map age: {age(inv.contracts_age_minutes)}</div>
+                  </div>
+                  <div className="card">
+                    <h3>Today Forecast Rows</h3>
+                    <div className="kpi">
+                      {todayRows.forecasts ?? 0}
+                      {prev && <Delta current={todayRows.forecasts ?? 0} previous={prev?.inventory?.today_rows?.forecasts} />}
+                    </div>
+                    <div className="sub">total: {inv.forecasts?.rows ?? 0}</div>
+                  </div>
+                  <div className="card">
+                    <h3>Today Observation Rows</h3>
+                    <div className="kpi">
+                      {todayRows.observations ?? 0}
+                      {prev && <Delta current={todayRows.observations ?? 0} previous={prev?.inventory?.today_rows?.observations} />}
+                    </div>
+                    <div className="sub">total: {inv.observations?.rows ?? 0}</div>
+                  </div>
+                  <div className="card">
+                    <h3>Today Signal Rows</h3>
+                    <div className="kpi">
+                      {todayRows.signals ?? 0}
+                      {prev && <Delta current={todayRows.signals ?? 0} previous={prev?.inventory?.today_rows?.signals} />}
+                    </div>
+                    <div className="sub">quotes today: {todayRows.quotes ?? 0}</div>
+                  </div>
+                  <div className="card">
+                    <h3>Paper Equity</h3>
+                    <div className="kpi sm">
+                      {money(summary?.paper?.equity)}
+                      {prev && <Delta current={Number(summary?.paper?.equity || 0)} previous={Number(prev?.paper?.equity || 0)} />}
+                    </div>
+                    <div className="sub">
+                      open: {summary?.paper?.open_positions ?? 0}, closed: {summary?.paper?.closed_positions ?? 0}
+                      {paperMetrics.pnl_net !== undefined && <span> | P&amp;L: {money(paperMetrics.pnl_net)}</span>}
+                      {paperMetrics.win_rate !== undefined && <span> | WR: {pct(paperMetrics.win_rate)}</span>}
+                    </div>
+                  </div>
+                  <div className={`card ${summary?.live?.allow_live_trading ? "live-active" : ""}`}>
+                    <h3>Live Equity {summary?.live?.allow_live_trading && <span className="good">(ACTIVE)</span>}</h3>
+                    <div className="kpi sm">
+                      {money(summary?.live?.equity)}
+                    </div>
+                    <div className="sub">
+                      open: {summary?.live?.open_positions ?? 0}, closed: {summary?.live?.closed_positions ?? 0}
+                      {summary?.live?.allow_live_trading === false && <span> | routing OFF</span>}
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
 
-            <div className="section two">
-              <div>
-                <h2>Latest Runtime Events</h2>
-                <DataTable
-                  rows={Object.entries(lastByEvent).map(([event, row]) => ({
-                    event,
-                    ts: row.ts || "",
-                    forecast_rows: row.forecast_rows ?? "",
-                    observation_rows: row.observation_rows ?? "",
-                    signals: row.signals ?? "",
-                    skipped_contracts: row.skipped_contracts ?? "",
-                    reason: row.reason ?? "",
-                  }))}
-                  preferredCols={["event", "ts", "forecast_rows", "observation_rows", "signals", "skipped_contracts", "reason"]}
-                />
-              </div>
-              <div>
-                <h2>Observation Day Coverage</h2>
-                <DataTable
-                  rows={Object.entries(inv.observation_unique_days_by_city || {}).map(([city, days]) => ({ city, days }))}
-                  preferredCols={["city", "days"]}
-                />
-              </div>
-            </div>
+            {/* ── Pipeline Tab ────────────────────────────── */}
+            {tab === "pipeline" && (
+              <>
+                <div className="section">
+                  <h2>Train Gate Progress By City</h2>
+                  <TrainTable snapshot={monitor} />
+                  {!gate.pass && Array.isArray(gate.reasons) && gate.reasons.length > 0 && (
+                    <div className="sub" style={{ marginTop: "8px" }}>Reasons: {gate.reasons.join(" | ")}</div>
+                  )}
+                </div>
 
-            <div className="section two">
-              <div>
-                <h2>Recent Signals</h2>
-                <DataTable
-                  rows={signals}
-                  preferredCols={["generated_at_utc", "ticker", "city", "side", "p_fair", "p_mkt", "ev_cents", "min_ev_cents"]}
-                />
-              </div>
-              <div>
-                <h2>Recent Governance Log</h2>
-                <DataTable
-                  rows={events}
-                  preferredCols={["ts", "event", "model_id", "forecast_rows", "observation_rows", "signals", "reason"]}
-                />
-              </div>
-            </div>
+                <div className="section">
+                  <h2>Pipeline Inventory and Freshness</h2>
+                  <DataTable
+                    rows={streamRows}
+                    preferredCols={["stream", "files", "rows", "latest_file", "age_minutes", "max_age", "stale"]}
+                    emptyMessage="No pipeline data yet"
+                    colorRules={streamColorRules}
+                  />
+                </div>
 
-            {err && <div className="err">Error: {err}</div>}
+                <div className="section">
+                  <h2>Scheduler Heartbeat (Event Recency)</h2>
+                  <DataTable
+                    rows={heartbeatRows}
+                    preferredCols={["event", "age_minutes"]}
+                    emptyMessage="No heartbeat events recorded"
+                  />
+                </div>
+
+                <div className="section">
+                  <h2>Observation Day Coverage</h2>
+                  <DataTable
+                    rows={Object.entries(inv.observation_unique_days_by_city || {}).map(([city, days]) => ({ city, days }))}
+                    preferredCols={["city", "days"]}
+                    emptyMessage="No observation data collected"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* ── Trading Tab ─────────────────────────────── */}
+            {tab === "trading" && (
+              <>
+                <div className="section">
+                  <h2>Recent Signals</h2>
+                  <DataTable
+                    rows={signals}
+                    preferredCols={["generated_at_utc", "ticker", "city", "side", "p_fair", "p_mkt", "ev_cents", "min_ev_cents"]}
+                    emptyMessage="No signals generated yet"
+                  />
+                </div>
+
+                <div className="section">
+                  <h2>Latest Market Quotes</h2>
+                  <DataTable
+                    rows={quotes}
+                    emptyMessage="No market quotes available"
+                  />
+                </div>
+
+                <div className="section">
+                  <h2>Open Positions (Paper)</h2>
+                  <DataTable
+                    rows={positions}
+                    emptyMessage="No open positions"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* ── Governance Tab ──────────────────────────── */}
+            {tab === "governance" && (
+              <>
+                <div className="section">
+                  <h2>Latest Runtime Events</h2>
+                  <DataTable
+                    rows={Object.entries(lastByEvent).map(([event, row]) => ({
+                      event,
+                      ts: row.ts || "",
+                      forecast_rows: row.forecast_rows ?? "",
+                      observation_rows: row.observation_rows ?? "",
+                      signals: row.signals ?? "",
+                      skipped_contracts: row.skipped_contracts ?? "",
+                      reason: row.reason ?? "",
+                    }))}
+                    preferredCols={["event", "ts", "forecast_rows", "observation_rows", "signals", "skipped_contracts", "reason"]}
+                    emptyMessage="No runtime events yet"
+                  />
+                </div>
+
+                <div className="section">
+                  <h2>Recent Governance Log</h2>
+                  <DataTable
+                    rows={events}
+                    preferredCols={["ts", "event", "model_id", "forecast_rows", "observation_rows", "signals", "reason"]}
+                    emptyMessage="No governance events"
+                  />
+                </div>
+              </>
+            )}
           </div>
         );
       }
@@ -515,4 +1439,4 @@
       ReactDOM.createRoot(document.getElementById("app")).render(<App />);
     </script>
   </body>
-  </html>
+</html>
