@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from weather_arb.risk.limits import compute_hybrid_live_limits, resolve_live_limits_for_day, spread_ok
+from weather_arb.risk.limits import (
+    cap_contracts_to_top_of_book,
+    compute_hybrid_live_limits,
+    resolve_live_limits_for_day,
+    spread_ok,
+)
 from weather_arb.types import MarketQuote
 
 
@@ -58,3 +63,46 @@ def test_spread_ok_is_side_aware_for_buy_no():
     )
     assert spread_ok(quote, side="buy_yes") is True
     assert spread_ok(quote, side="buy_no") is False
+
+
+def test_cap_to_book_depth_entry_and_exit_sides():
+    quote = MarketQuote(
+        ticker="TEST",
+        ts_utc=datetime(2026, 3, 3, 14, 0, tzinfo=timezone.utc),
+        yes_bid_dollars=0.49,
+        yes_ask_dollars=0.50,
+        no_bid_dollars=0.49,
+        no_ask_dollars=0.50,
+        yes_bid_size=3,
+        yes_ask_size=8,
+        no_bid_size=4,
+        no_ask_size=9,
+    )
+
+    entry_yes, reason_entry_yes = cap_contracts_to_top_of_book(20, quote, "buy_yes", action="entry")
+    entry_no, reason_entry_no = cap_contracts_to_top_of_book(20, quote, "buy_no", action="entry")
+    exit_yes, reason_exit_yes = cap_contracts_to_top_of_book(20, quote, "buy_yes", action="exit")
+    exit_no, reason_exit_no = cap_contracts_to_top_of_book(20, quote, "buy_no", action="exit")
+
+    assert entry_yes == 8 and reason_entry_yes == "depth_cap_entry"
+    assert entry_no == 9 and reason_entry_no == "depth_cap_entry"
+    assert exit_yes == 3 and reason_exit_yes == "depth_cap_exit"
+    assert exit_no == 4 and reason_exit_no == "depth_cap_exit"
+
+
+def test_cap_to_book_depth_zero_available_returns_zero():
+    quote = MarketQuote(
+        ticker="TEST",
+        ts_utc=datetime(2026, 3, 3, 14, 0, tzinfo=timezone.utc),
+        yes_bid_dollars=0.49,
+        yes_ask_dollars=0.50,
+        no_bid_dollars=0.49,
+        no_ask_dollars=0.50,
+        yes_bid_size=0,
+        yes_ask_size=0,
+        no_bid_size=0,
+        no_ask_size=0,
+    )
+    capped, reason = cap_contracts_to_top_of_book(5, quote, "buy_yes", action="exit")
+    assert capped == 0
+    assert reason == "depth_cap_exit"

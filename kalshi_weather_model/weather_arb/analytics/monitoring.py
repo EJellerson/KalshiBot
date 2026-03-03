@@ -229,6 +229,43 @@ def _merge_stream_inventory(legacy: dict[str, Any], strategy: dict[str, Any]) ->
     }
 
 
+def contracts_active_inventory_snapshot(now_utc: datetime | None = None) -> dict[str, Any]:
+    now = now_utc or datetime.now(timezone.utc)
+    strategy_rows = 0
+    latest_strategy_mtime: float | None = None
+
+    for strategy_id in config.WEATHER_STRATEGY_IDS:
+        path = config.strategy_contracts_active_path(strategy_id)
+        if not path.exists():
+            continue
+        strategy_rows += int(_parquet_rows_quick(path))
+        mtime = path.stat().st_mtime
+        if latest_strategy_mtime is None or mtime > latest_strategy_mtime:
+            latest_strategy_mtime = mtime
+
+    if strategy_rows > 0 and latest_strategy_mtime is not None:
+        latest_ts = datetime.fromtimestamp(latest_strategy_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+        return {
+            "contracts_active": strategy_rows,
+            "contracts_latest_mtime_utc": latest_ts,
+            "contracts_age_minutes": _minutes_since(latest_ts, now),
+            "contracts_source": "strategy_aggregate",
+        }
+
+    global_rows = int(_parquet_rows_quick(config.CONTRACTS_ACTIVE_PATH))
+    latest_ts = (
+        datetime.fromtimestamp(config.CONTRACTS_ACTIVE_PATH.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+        if config.CONTRACTS_ACTIVE_PATH.exists()
+        else None
+    )
+    return {
+        "contracts_active": global_rows,
+        "contracts_latest_mtime_utc": latest_ts,
+        "contracts_age_minutes": _minutes_since(latest_ts, now),
+        "contracts_source": "global_fallback",
+    }
+
+
 def data_inventory_snapshot() -> dict[str, Any]:
     now_utc = datetime.now(timezone.utc)
     legacy_quotes = parquet_inventory(config.MARKET_QUOTES_DIR, prefix="quotes_")
@@ -255,18 +292,7 @@ def data_inventory_snapshot() -> dict[str, Any]:
         ),
     }
     inventory["observation_unique_days_by_city"] = extract_observation_unique_days()
-
-    try:
-        active_contracts = int(_parquet_rows_quick(config.CONTRACTS_ACTIVE_PATH))
-    except Exception:
-        active_contracts = 0
-    inventory["contracts_active"] = active_contracts
-    inventory["contracts_latest_mtime_utc"] = (
-        datetime.fromtimestamp(config.CONTRACTS_ACTIVE_PATH.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
-        if config.CONTRACTS_ACTIVE_PATH.exists()
-        else None
-    )
-    inventory["contracts_age_minutes"] = _minutes_since(inventory["contracts_latest_mtime_utc"], now_utc)
+    inventory.update(contracts_active_inventory_snapshot(now_utc=now_utc))
 
     thresholds = _stream_freshness_thresholds()
     stream_age_minutes: dict[str, float | None] = {}

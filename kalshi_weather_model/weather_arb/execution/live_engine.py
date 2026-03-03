@@ -8,6 +8,7 @@ import json
 from weather_arb import config
 from weather_arb.connectors.kalshi import KalshiAuthClient
 from weather_arb.risk.limits import (
+    cap_contracts_to_top_of_book,
     can_open_more,
     contracts_for_notional,
     daily_stop_hit,
@@ -42,10 +43,24 @@ def _week_key(now_utc: datetime) -> str:
     return f"{y}-W{w:02d}"
 
 
+def _parse_iso_utc(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _to_quote(raw: dict[str, Any]) -> MarketQuote:
+    ts = _parse_iso_utc(raw.get("ts_utc")) or datetime.now(timezone.utc)
     return MarketQuote(
         ticker=str(raw["ticker"]),
-        ts_utc=datetime.fromisoformat(str(raw.get("ts_utc") or datetime.now(timezone.utc).isoformat())),
+        ts_utc=ts,
         yes_bid_dollars=float(raw["yes_bid_dollars"]),
         yes_ask_dollars=float(raw["yes_ask_dollars"]),
         no_bid_dollars=float(raw["no_bid_dollars"]),
@@ -67,14 +82,25 @@ def _exit_price(quote: MarketQuote, side: str) -> float:
 
 def _should_exit(pos: dict[str, Any], signal_map: dict[str, float], now_utc: datetime) -> bool:
     ticker = str(pos.get("ticker", ""))
-    if ticker in signal_map and signal_map[ticker] <= config.EXIT_EV_CENTS:
-        return True
+    if ticker in signal_map:
+        if signal_map[ticker] <= config.EXIT_EV_CENTS:
+            return True
+    else:
+        opened_at = _parse_iso_utc(pos.get("opened_at_utc"))
+        if opened_at is not None:
+            age_hours = max(0.0, (now_utc - opened_at).total_seconds() / 3600.0)
+            if age_hours >= float(config.ORPHAN_EXIT_HOURS):
+                return True
 
-    max_hold = datetime.fromisoformat(str(pos.get("max_hold_until_utc")))
+    max_hold = _parse_iso_utc(pos.get("max_hold_until_utc"))
+    if max_hold is None:
+        return True
     if now_utc >= max_hold:
         return True
 
-    settlement_ts = datetime.fromisoformat(str(pos.get("settlement_ts_utc")))
+    settlement_ts = _parse_iso_utc(pos.get("settlement_ts_utc"))
+    if settlement_ts is None:
+        return True
     if now_utc >= settlement_ts - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS):
         return True
 
@@ -107,7 +133,7 @@ def _exit_filled(broker_resp: dict[str, Any] | None) -> bool:
         if status_value in {"open", "resting", "pending", "partially_filled", "cancelled", "canceled", "rejected"}:
             return False
     # Backward-compatible fallback for thin test doubles that don't include status.
-    return bool(broker_resp.get("ok", True))
+    return bool(broker_resp.get("ok", False))
 
 
 def _extract_first_float(payload: dict[str, Any], keys: list[str]) -> float | None:
@@ -127,6 +153,140 @@ def _extract_first_float(payload: dict[str, Any], keys: list[str]) -> float | No
             if parsed > 0:
                 return parsed
     return None
+
+
+def _entry_status(position: dict[str, Any]) -> str:
+    status = str(position.get("entry_status", "")).strip().lower()
+    if status in {"pending_confirmation", "confirmed", "unconfirmed"}:
+        return status
+    return "confirmed"
+
+
+def _extract_broker_position_tickers(payload: dict[str, Any] | None) -> set[str]:
+    tickers: set[str] = set()
+    if not isinstance(payload, dict):
+        return tickers
+
+    queue: list[Any] = [payload.get("positions"), payload.get("data"), payload]
+    seen: set[int] = set()
+    ticker_keys = {"ticker", "market_ticker", "marketticker", "event_ticker", "eventticker"}
+
+    while queue:
+        item = queue.pop(0)
+        marker = id(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+
+        if isinstance(item, dict):
+            for key, value in item.items():
+                key_l = str(key).strip().lower()
+                if key_l in ticker_keys:
+                    ticker = str(value or "").strip()
+                    if ticker:
+                        tickers.add(ticker)
+                elif isinstance(value, (dict, list, tuple)):
+                    queue.append(value)
+        elif isinstance(item, (list, tuple)):
+            queue.extend(item)
+
+    return tickers
+
+
+def _reconcile_optimistic_entries(
+    open_positions: list[dict[str, Any]],
+    now_utc: datetime,
+    auth_client: KalshiAuthClient | None,
+) -> tuple[list[dict[str, Any]], dict[str, int], list[dict[str, Any]]]:
+    grace_minutes = max(int(config.LIVE_ENTRY_CONFIRM_GRACE_MINUTES), 0)
+    grace = timedelta(minutes=grace_minutes)
+
+    needs_broker_check = False
+    for pos in open_positions:
+        status = _entry_status(pos)
+        if status not in {"pending_confirmation", "unconfirmed"}:
+            continue
+        submitted_at = _parse_iso_utc(pos.get("entry_submitted_at_utc")) or _parse_iso_utc(pos.get("opened_at_utc"))
+        if status == "unconfirmed":
+            needs_broker_check = True
+            break
+        if submitted_at is None or (now_utc - submitted_at) >= grace:
+            needs_broker_check = True
+            break
+
+    broker_tickers: set[str] | None = None
+    reconcile_error = ""
+    if needs_broker_check and auth_client is not None:
+        try:
+            broker_payload = auth_client.get_positions()
+            broker_tickers = _extract_broker_position_tickers(broker_payload if isinstance(broker_payload, dict) else {})
+        except Exception as exc:
+            reconcile_error = str(exc)
+
+    next_positions: list[dict[str, Any]] = []
+    for pos in open_positions:
+        row = dict(pos)
+        status = _entry_status(row)
+        if status not in {"pending_confirmation", "unconfirmed"}:
+            next_positions.append(row)
+            continue
+
+        submitted_at = _parse_iso_utc(row.get("entry_submitted_at_utc")) or _parse_iso_utc(row.get("opened_at_utc"))
+        due = status == "unconfirmed" or submitted_at is None or (now_utc - submitted_at) >= grace
+        if not due:
+            row.setdefault("entry_status", status)
+            row.setdefault("entry_reconcile_notes", "awaiting_broker_confirmation")
+            next_positions.append(row)
+            continue
+
+        row["entry_last_checked_at_utc"] = now_utc.isoformat()
+        ticker = str(row.get("ticker", "")).strip()
+        if broker_tickers is not None:
+            if ticker and ticker in broker_tickers:
+                row["entry_status"] = "confirmed"
+                row["entry_reconcile_notes"] = "confirmed_via_broker_positions"
+            else:
+                row["entry_status"] = "unconfirmed"
+                row["entry_reconcile_notes"] = "grace_elapsed_not_in_broker_positions"
+        elif reconcile_error:
+            row.setdefault("entry_status", status)
+            row["entry_reconcile_notes"] = f"reconcile_error:{reconcile_error}"
+        else:
+            row.setdefault("entry_status", status)
+            row["entry_reconcile_notes"] = "reconcile_skipped_no_auth_client"
+        next_positions.append(row)
+
+    counts = {"pending": 0, "confirmed": 0, "unconfirmed": 0}
+    for pos in next_positions:
+        status = _entry_status(pos)
+        if status == "pending_confirmation":
+            counts["pending"] += 1
+        elif status == "unconfirmed":
+            counts["unconfirmed"] += 1
+        else:
+            counts["confirmed"] += 1
+
+    alerts: list[dict[str, Any]] = []
+    if reconcile_error:
+        alerts.append(
+            {
+                "severity": "warn",
+                "code": "live_entry_reconcile_error",
+                "message": "Entry reconciliation failed while fetching broker positions.",
+                "error": reconcile_error,
+            }
+        )
+    if counts["unconfirmed"] > 0:
+        alerts.append(
+            {
+                "severity": "warn",
+                "code": "live_entry_unconfirmed",
+                "message": f"{counts['unconfirmed']} live entries are still unconfirmed after grace period.",
+                "count": counts["unconfirmed"],
+            }
+        )
+
+    return next_positions, counts, alerts
 
 
 def _sync_live_equity_from_api(
@@ -238,13 +398,17 @@ def run_live_cycle(
 
     open_positions = list(state.get("open_positions", []))
     closed_positions = list(state.get("closed_positions", []))
+    open_positions, entry_reconcile_counts, reconcile_alerts = _reconcile_optimistic_entries(open_positions, now_utc, auth_client)
 
     signal_ev_map: dict[str, float] = {}
     for raw in signals:
         ticker = str(raw.get("ticker", ""))
-        signal_ev_map[ticker] = abs(float(raw.get("ev_cents", 0.0) or 0.0))
+        signal_ev_map[ticker] = float(raw.get("ev_cents", 0.0) or 0.0)
 
     closed = 0
+    capped_entry_count = 0
+    capped_exit_count = 0
+    depth_skipped_count = 0
     exit_order_events: list[dict[str, Any]] = []
     kept_open: list[dict[str, Any]] = []
     for pos in open_positions:
@@ -259,9 +423,41 @@ def run_live_cycle(
             continue
 
         side = str(pos.get("side", ""))
-        contracts = int(pos.get("contracts", 0) or 0)
-        if contracts <= 0:
+        requested_contracts = int(pos.get("contracts", 0) or 0)
+        if requested_contracts <= 0:
             kept_open.append(pos)
+            continue
+        close_contracts, cap_reason = cap_contracts_to_top_of_book(
+            requested_contracts,
+            quote,
+            side,
+            action="exit",
+        )
+        if close_contracts < requested_contracts:
+            capped_exit_count += 1
+        if close_contracts <= 0:
+            pending = dict(pos)
+            pending["pending_exit_submitted_at_utc"] = now_utc.isoformat()
+            pending["pending_exit_reason"] = cap_reason or "depth_cap_exit"
+            pending["requested_contracts"] = requested_contracts
+            pending["capped_contracts"] = close_contracts
+            pending["cap_reason"] = cap_reason
+            kept_open.append(pending)
+            depth_skipped_count += 1
+            exit_order_events.append(
+                {
+                    "ticker": ticker,
+                    "position_id": pos.get("position_id"),
+                    "side": _close_side_from_position_side(side),
+                    "contracts": close_contracts,
+                    "requested_contracts": requested_contracts,
+                    "capped_contracts": close_contracts,
+                    "cap_reason": cap_reason,
+                    "exit_price": _exit_price(quote, side),
+                    "filled": False,
+                    "error": cap_reason or "depth_cap_exit",
+                }
+            )
             continue
 
         exit_px = _exit_price(quote, side)
@@ -270,7 +466,7 @@ def run_live_cycle(
             "ticker": ticker,
             "side": close_side,
             "action": "sell",
-            "count": contracts,
+            "count": close_contracts,
             "yes_price_dollars": exit_px if close_side == "yes" else None,
             "no_price_dollars": exit_px if close_side == "no" else None,
             "reduce_only": True,
@@ -292,7 +488,10 @@ def run_live_cycle(
                 "ticker": ticker,
                 "position_id": pos.get("position_id"),
                 "side": close_side,
-                "contracts": contracts,
+                "contracts": close_contracts,
+                "requested_contracts": requested_contracts,
+                "capped_contracts": close_contracts,
+                "cap_reason": cap_reason,
                 "exit_price": exit_px,
                 "filled": bool(filled),
                 "error": exit_error or None,
@@ -302,23 +501,37 @@ def run_live_cycle(
             pending = dict(pos)
             pending["pending_exit_submitted_at_utc"] = now_utc.isoformat()
             pending["pending_exit_response"] = broker_resp or {}
+            pending["requested_contracts"] = requested_contracts
+            pending["capped_contracts"] = close_contracts
+            pending["cap_reason"] = cap_reason
             if exit_error:
                 pending["pending_exit_error"] = exit_error
             kept_open.append(pending)
             continue
 
         entry_px = float(pos.get("entry_price_dollars", 0.0) or 0.0)
-        fees = contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
-        pnl = (exit_px - entry_px) * contracts - fees
+        fees = close_contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
+        pnl = (exit_px - entry_px) * close_contracts - fees
         out = dict(pos)
         out["status"] = "closed"
         out["closed_at_utc"] = now_utc.isoformat()
+        out["contracts"] = close_contracts
         out["close_price_dollars"] = exit_px
         out["realized_pnl_dollars"] = float(pnl)
-        out["close_reason"] = "signal_or_time"
+        out["close_reason"] = "signal_or_time_partial" if close_contracts < requested_contracts else "signal_or_time"
+        out["requested_contracts"] = requested_contracts
+        out["capped_contracts"] = close_contracts
+        out["cap_reason"] = cap_reason
         out["live_exit_order_response"] = broker_resp or {}
         closed_positions.append(out)
         closed += 1
+
+        if close_contracts < requested_contracts:
+            remaining = dict(pos)
+            remaining_contracts = requested_contracts - close_contracts
+            remaining["contracts"] = remaining_contracts
+            remaining["entry_fees_dollars"] = remaining_contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
+            kept_open.append(remaining)
 
         state.setdefault("daily_pnl", {})[date_key] = float(state.get("daily_pnl", {}).get(date_key, 0.0) or 0.0) + pnl
         state.setdefault("weekly_pnl", {})[week_key] = float(state.get("weekly_pnl", {}).get(week_key, 0.0) or 0.0) + pnl
@@ -357,8 +570,17 @@ def run_live_cycle(
             continue
 
         entry_price = _entry_price(quote, side)
-        contracts = contracts_for_notional(entry_price, limits.max_position_dollars)
+        requested_contracts = contracts_for_notional(entry_price, limits.max_position_dollars)
+        contracts, cap_reason = cap_contracts_to_top_of_book(
+            requested_contracts,
+            quote,
+            side,
+            action="entry",
+        )
+        if contracts < requested_contracts:
+            capped_entry_count += 1
         if contracts <= 0:
+            depth_skipped_count += 1
             continue
 
         new_notional = open_notional + (entry_price * contracts)
@@ -383,9 +605,10 @@ def run_live_cycle(
         pos_id = int(state.get("next_position_id", 1) or 1)
         state["next_position_id"] = pos_id + 1
         settlement_ts = raw.get("settlement_ts_utc") or (now_utc + timedelta(days=1)).isoformat()
+        settlement_dt = _parse_iso_utc(settlement_ts) or (now_utc + timedelta(days=1))
         max_hold = min(
             now_utc + timedelta(hours=config.MAX_HOLD_HOURS),
-            datetime.fromisoformat(str(settlement_ts)) - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
+            settlement_dt - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
         )
 
         pos = {
@@ -402,6 +625,13 @@ def run_live_cycle(
             "status": "open",
             "live_order_submitted": placed,
             "live_order_response": broker_resp or {},
+            "entry_status": "pending_confirmation",
+            "entry_submitted_at_utc": now_utc.isoformat(),
+            "entry_last_checked_at_utc": now_utc.isoformat(),
+            "entry_reconcile_notes": "awaiting_broker_confirmation",
+            "requested_contracts": requested_contracts,
+            "capped_contracts": contracts,
+            "cap_reason": cap_reason,
         }
         open_positions.append(pos)
         open_notional = new_notional
@@ -411,6 +641,9 @@ def run_live_cycle(
                 "ticker": ticker,
                 "side": side,
                 "contracts": contracts,
+                "requested_contracts": requested_contracts,
+                "capped_contracts": contracts,
+                "cap_reason": cap_reason,
                 "entry_price": entry_price,
                 "live_order_submitted": placed,
             }
@@ -431,6 +664,11 @@ def run_live_cycle(
                     "closed": closed,
                     "orders": order_events,
                     "exit_orders": exit_order_events,
+                    "capped_entries": capped_entry_count,
+                    "capped_exits": capped_exit_count,
+                    "depth_skipped": depth_skipped_count,
+                    "entry_reconciliation": entry_reconcile_counts,
+                    "alerts": reconcile_alerts,
                     "limits": state.get("live_limits", {}),
                 },
                 default=str,
@@ -443,5 +681,12 @@ def run_live_cycle(
         "closed": closed,
         "orders": order_events,
         "exit_orders": exit_order_events,
+        "capped_entries": capped_entry_count,
+        "capped_exits": capped_exit_count,
+        "depth_skipped": depth_skipped_count,
+        "pending": entry_reconcile_counts["pending"],
+        "confirmed": entry_reconcile_counts["confirmed"],
+        "unconfirmed": entry_reconcile_counts["unconfirmed"],
+        "alerts": reconcile_alerts,
         "limits": state.get("live_limits", {}),
     }
