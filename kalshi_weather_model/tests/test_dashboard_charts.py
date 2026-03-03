@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import subprocess
 
 import pandas as pd
+from fastapi.routing import APIRoute
 
 from weather_arb import config
 from weather_arb.dashboard import app as dashboard_app
@@ -112,3 +114,49 @@ def test_latest_signal_and_quote_rows_read_strategy_dirs(monkeypatch, tmp_path):
 
     assert latest_signal and latest_signal[0]["ticker"] == "NEW"
     assert latest_quote and latest_quote[0]["ticker"] == "QNEW"
+
+
+def test_contracts_rows_prefer_strategy_aggregate(monkeypatch, tmp_path):
+    _patch_dashboard_paths(monkeypatch, tmp_path)
+    contracts_dir = tmp_path / "contracts"
+    contracts_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "CONTRACTS_DIR", contracts_dir)
+    monkeypatch.setattr(config, "CONTRACTS_ACTIVE_PATH", contracts_dir / "contracts_active.parquet")
+
+    for strategy_id in ("weather_temp_high", "weather_temp_low"):
+        config.strategy_contracts_dir(strategy_id).mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame([{"ticker": "STRAT_HIGH_A"}, {"ticker": "STRAT_HIGH_B"}]).to_parquet(
+        config.strategy_contracts_active_path("weather_temp_high"),
+        index=False,
+    )
+    pd.DataFrame([{"ticker": "STRAT_LOW_A"}]).to_parquet(
+        config.strategy_contracts_active_path("weather_temp_low"),
+        index=False,
+    )
+    pd.DataFrame([{"ticker": "LEGACY_ONLY"}]).to_parquet(config.CONTRACTS_ACTIVE_PATH, index=False)
+
+    rows = dashboard_app._contracts_rows(limit=10)
+    tickers = {str(r.get("ticker", "")) for r in rows}
+    assert "LEGACY_ONLY" not in tickers
+    assert tickers == {"STRAT_HIGH_A", "STRAT_HIGH_B", "STRAT_LOW_A"}
+
+
+def test_ops_start_scheduler_timeout_returns_json_error(monkeypatch):
+    app = dashboard_app.create_app()
+
+    def _timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="launchctl", timeout=10)
+
+    monkeypatch.setattr(dashboard_app.subprocess, "run", _timeout)
+    endpoint = None
+    for route in app.routes:
+        if isinstance(route, APIRoute) and route.path == "/api/ops/start-scheduler" and "POST" in set(route.methods or set()):
+            endpoint = route.endpoint
+            break
+    assert endpoint is not None
+    payload = endpoint()
+
+    assert payload["ok"] is False
+    assert payload["step"] == "bootstrap"
+    assert payload["error"] == "timeout"

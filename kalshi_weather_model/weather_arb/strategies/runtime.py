@@ -1177,7 +1177,22 @@ def _leaderboard_row(strategy_id: str) -> dict[str, Any]:
     consistency = positive_days / max(trading_days, 1)
 
     gate = safe_read_json(config.strategy_runtime_gates_path(strategy_id)) or {}
-    data_health_green = bool((gate.get("data_health") or {}).get("green", False))
+    cycle = safe_read_json(config.strategy_runtime_cycle_path(strategy_id)) or {}
+    checks = dict((cycle.get("entry_gate") or {}).get("checks") or {})
+    if checks:
+        data_health_green = bool(
+            checks.get("parse_ok", False)
+            and checks.get("eligible_ok", False)
+            and checks.get("freshness_ok", False)
+            and checks.get("liquidity_ok", False)
+            and checks.get("benchmark_ok", False)
+        )
+        data_health_source = "cycle_entry_checks"
+        data_health_source_ts_utc = cycle.get("ts_utc")
+    else:
+        data_health_green = bool((gate.get("data_health") or {}).get("green", False))
+        data_health_source = "daily_gate_fallback"
+        data_health_source_ts_utc = gate.get("ts_utc")
 
     return {
         "strategy_id": strategy_id,
@@ -1189,6 +1204,9 @@ def _leaderboard_row(strategy_id: str) -> dict[str, Any]:
         "drawdown": drawdown,
         "consistency": consistency,
         "data_health": 1.0 if data_health_green else 0.0,
+        "data_health_green": bool(data_health_green),
+        "data_health_source": data_health_source,
+        "data_health_source_ts_utc": data_health_source_ts_utc,
         "eligible": bool(gate.get("eligible_for_challenger", False)),
     }
 

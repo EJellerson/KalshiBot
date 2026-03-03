@@ -320,3 +320,51 @@ def test_portfolio_leaderboard_is_deterministic(monkeypatch, tmp_path):
     second_rows = [(r["strategy_id"], r["rank"], r["score"]) for r in second["rows"]]
     assert first_rows == second_rows
     assert first_rows[0][0] == "weather_temp_high"
+
+
+def test_leaderboard_uses_cycle_data_health_freshness(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    safe_write_json_atomic(
+        config.strategy_paper_metrics_daily_path(strategy_id),
+        {
+            "by_day": {
+                "2026-03-01": {
+                    "trades": 2,
+                    "wins": 1,
+                    "pnl_dollars": 1.0,
+                    "roi_per_trade": 0.01,
+                }
+            }
+        },
+    )
+    safe_write_json_atomic(
+        config.strategy_runtime_gates_path(strategy_id),
+        {
+            "eligible_for_challenger": True,
+            "data_health": {"green": True},
+            "ts_utc": "2026-03-01T00:00:00+00:00",
+        },
+    )
+    safe_write_json_atomic(
+        config.strategy_runtime_cycle_path(strategy_id),
+        {
+            "ts_utc": "2026-03-03T12:15:00+00:00",
+            "entry_gate": {
+                "checks": {
+                    "parse_ok": True,
+                    "eligible_ok": True,
+                    "freshness_ok": False,
+                    "liquidity_ok": True,
+                    "benchmark_ok": True,
+                }
+            },
+        },
+    )
+
+    row = runtime._leaderboard_row(strategy_id)
+    assert row["eligible"] is True
+    assert row["data_health"] == 0.0
+    assert row["data_health_green"] is False
+    assert row["data_health_source"] == "cycle_entry_checks"
+    assert row["data_health_source_ts_utc"] == "2026-03-03T12:15:00+00:00"

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pandas as pd
+
 from weather_arb.analytics import monitoring
 
 
@@ -143,3 +147,48 @@ def test_variant_parse_warmup_routed_to_info_for_tradable(monkeypatch) -> None:
     assert "contract_parse_degraded_weather_temp_high" not in actionable_codes
     assert "contract_parse_degraded_weather_temp_high" in info_codes
     assert int((out.get("suppressed") or {}).get("by_reason", {}).get("warmup_parse_sample", 0)) >= 1
+
+
+def _patch_monitoring_paths(monkeypatch, tmp_path: Path) -> None:
+    forecasts = tmp_path / "forecast_snapshots"
+    observations = tmp_path / "observations"
+    quotes = tmp_path / "market_quotes"
+    signals = tmp_path / "signals"
+    contracts = tmp_path / "contracts"
+    strategies = tmp_path / "strategies"
+
+    for path in [forecasts, observations, quotes, signals, contracts, strategies]:
+        path.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(monitoring.config, "FORECAST_SNAPSHOTS_DIR", forecasts)
+    monkeypatch.setattr(monitoring.config, "OBSERVATIONS_DIR", observations)
+    monkeypatch.setattr(monitoring.config, "MARKET_QUOTES_DIR", quotes)
+    monkeypatch.setattr(monitoring.config, "SIGNALS_DIR", signals)
+    monkeypatch.setattr(monitoring.config, "CONTRACTS_DIR", contracts)
+    monkeypatch.setattr(monitoring.config, "CONTRACTS_ACTIVE_PATH", contracts / "contracts_active.parquet")
+    monkeypatch.setattr(monitoring.config, "STRATEGIES_DIR", strategies)
+
+    for strategy_id in monitoring.config.WEATHER_STRATEGY_IDS:
+        monitoring.config.strategy_contracts_dir(strategy_id).mkdir(parents=True, exist_ok=True)
+        monitoring.config.strategy_quotes_dir(strategy_id).mkdir(parents=True, exist_ok=True)
+        monitoring.config.strategy_signals_dir(strategy_id).mkdir(parents=True, exist_ok=True)
+
+
+def test_inventory_contracts_use_strategy_aggregate_first(monkeypatch, tmp_path) -> None:
+    _patch_monitoring_paths(monkeypatch, tmp_path)
+
+    pd.DataFrame([{"ticker": "LEGACY"}]).to_parquet(monitoring.config.CONTRACTS_ACTIVE_PATH, index=False)
+    pd.DataFrame([{"ticker": "H1"}, {"ticker": "H2"}]).to_parquet(
+        monitoring.config.strategy_contracts_active_path("weather_temp_high"),
+        index=False,
+    )
+    pd.DataFrame([{"ticker": "L1"}]).to_parquet(
+        monitoring.config.strategy_contracts_active_path("weather_temp_low"),
+        index=False,
+    )
+
+    snapshot = monitoring.data_inventory_snapshot()
+    assert int(snapshot.get("contracts_active", 0)) == 3
+    assert snapshot.get("contracts_source") == "strategy_aggregate"
+    assert snapshot.get("contracts_latest_mtime_utc") is not None
+    assert snapshot.get("contracts_age_minutes") is not None

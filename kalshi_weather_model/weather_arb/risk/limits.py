@@ -123,6 +123,42 @@ def contracts_for_notional(price_dollars: float, max_position_dollars: float) ->
     return max(int(max_position_dollars // price_dollars), 0)
 
 
+def top_of_book_size_for_order(quote: MarketQuote, side: str, *, action: str = "entry") -> int:
+    side_l = str(side or "").strip().lower()
+    action_l = str(action or "").strip().lower()
+
+    if action_l == "entry":
+        if side_l == "buy_yes":
+            return max(int(quote.yes_ask_size), 0)
+        if side_l == "buy_no":
+            return max(int(quote.no_ask_size), 0)
+        raise ValueError(f"unsupported entry side: {side}")
+
+    if action_l == "exit":
+        if side_l == "buy_yes":
+            return max(int(quote.yes_bid_size), 0)
+        if side_l == "buy_no":
+            return max(int(quote.no_bid_size), 0)
+        raise ValueError(f"unsupported exit side: {side}")
+
+    raise ValueError(f"unsupported action: {action}")
+
+
+def cap_contracts_to_top_of_book(
+    contracts: int,
+    quote: MarketQuote,
+    side: str,
+    *,
+    action: str = "entry",
+) -> tuple[int, str | None]:
+    requested = max(int(contracts), 0)
+    available = top_of_book_size_for_order(quote, side, action=action)
+    capped = min(requested, available)
+    if capped >= requested:
+        return capped, None
+    return capped, f"depth_cap_{action}"
+
+
 def can_open_more(open_positions: int, limits: RiskLimits) -> bool:
     return open_positions < limits.max_concurrent_positions
 

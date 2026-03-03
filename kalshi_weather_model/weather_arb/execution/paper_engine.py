@@ -7,6 +7,7 @@ import json
 
 from weather_arb import config
 from weather_arb.risk.limits import (
+    cap_contracts_to_top_of_book,
     can_open_more,
     contracts_for_notional,
     daily_stop_hit,
@@ -47,9 +48,10 @@ def _exit_price(quote: MarketQuote, side: str) -> float:
 
 
 def _to_quote(raw: dict[str, Any]) -> MarketQuote:
+    ts = _parse_iso_utc(raw.get("ts_utc")) or datetime.now(timezone.utc)
     return MarketQuote(
         ticker=str(raw["ticker"]),
-        ts_utc=datetime.fromisoformat(str(raw.get("ts_utc") or datetime.now(timezone.utc).isoformat())),
+        ts_utc=ts,
         yes_bid_dollars=float(raw["yes_bid_dollars"]),
         yes_ask_dollars=float(raw["yes_ask_dollars"]),
         no_bid_dollars=float(raw["no_bid_dollars"]),
@@ -61,21 +63,44 @@ def _to_quote(raw: dict[str, Any]) -> MarketQuote:
     )
 
 
+def _parse_iso_utc(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _should_exit(pos: dict[str, Any], signal_map: dict[str, float], now_utc: datetime) -> bool:
     ticker = str(pos.get("ticker", ""))
-    if ticker in signal_map and signal_map[ticker] <= config.EXIT_EV_CENTS:
-        return True
+    if ticker in signal_map:
+        if signal_map[ticker] <= config.EXIT_EV_CENTS:
+            return True
+    else:
+        opened_at = _parse_iso_utc(pos.get("opened_at_utc"))
+        if opened_at is not None:
+            age_hours = max(0.0, (now_utc - opened_at).total_seconds() / 3600.0)
+            if age_hours >= float(config.ORPHAN_EXIT_HOURS):
+                return True
 
     return _should_exit_time_only(pos, now_utc)
 
 
 def _should_exit_time_only(pos: dict[str, Any], now_utc: datetime) -> bool:
-
-    max_hold = datetime.fromisoformat(str(pos.get("max_hold_until_utc")))
+    max_hold = _parse_iso_utc(pos.get("max_hold_until_utc"))
+    if max_hold is None:
+        return True
     if now_utc >= max_hold:
         return True
 
-    settlement_ts = datetime.fromisoformat(str(pos.get("settlement_ts_utc")))
+    settlement_ts = _parse_iso_utc(pos.get("settlement_ts_utc"))
+    if settlement_ts is None:
+        return True
     if now_utc >= settlement_ts - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS):
         return True
 
@@ -133,10 +158,13 @@ def run_paper_cycle(
         raw = signal.__dict__ if hasattr(signal, "__dict__") else dict(signal)
         ticker = str(raw.get("ticker", ""))
         ev = float(raw.get("ev_cents", 0.0) or 0.0)
-        signal_ev_map[ticker] = abs(ev)
+        signal_ev_map[ticker] = ev
         normalized_signals.append(raw)
 
     closed_count = 0
+    capped_entry_count = 0
+    capped_exit_count = 0
+    depth_skipped_count = 0
     kept_open: list[dict[str, Any]] = []
     for pos in open_positions:
         ticker = str(pos.get("ticker", ""))
@@ -175,18 +203,45 @@ def run_paper_cycle(
 
         exit_px = _exit_price(quote, str(pos.get("side")))
         contracts = int(pos.get("contracts", 0) or 0)
+        close_contracts, cap_reason = cap_contracts_to_top_of_book(
+            contracts,
+            quote,
+            str(pos.get("side", "")),
+            action="exit",
+        )
+        if close_contracts < contracts:
+            capped_exit_count += 1
+        if close_contracts <= 0:
+            pending = dict(pos)
+            pending["pending_exit_submitted_at_utc"] = now_utc.isoformat()
+            pending["pending_exit_reason"] = cap_reason or "depth_cap_exit"
+            kept_open.append(pending)
+            depth_skipped_count += 1
+            continue
+
         entry_px = float(pos.get("entry_price_dollars", 0.0) or 0.0)
-        fees = contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
-        pnl = (exit_px - entry_px) * contracts - fees
+        fees = close_contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
+        pnl = (exit_px - entry_px) * close_contracts - fees
 
         out = dict(pos)
         out["status"] = "closed"
         out["closed_at_utc"] = now_utc.isoformat()
+        out["contracts"] = close_contracts
         out["close_price_dollars"] = exit_px
         out["realized_pnl_dollars"] = float(pnl)
-        out["close_reason"] = "signal_or_time"
+        out["close_reason"] = "signal_or_time_partial" if close_contracts < contracts else "signal_or_time"
+        out["requested_contracts"] = contracts
+        out["capped_contracts"] = close_contracts
+        out["cap_reason"] = cap_reason
         closed_positions.append(out)
         closed_count += 1
+
+        if close_contracts < contracts:
+            remaining = dict(pos)
+            remaining_contracts = contracts - close_contracts
+            remaining["contracts"] = remaining_contracts
+            remaining["entry_fees_dollars"] = remaining_contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
+            kept_open.append(remaining)
 
         state.setdefault("daily_pnl", {})[date_key] = float(state.get("daily_pnl", {}).get(date_key, 0.0) or 0.0) + pnl
         state.setdefault("weekly_pnl", {})[week_key] = float(state.get("weekly_pnl", {}).get(week_key, 0.0) or 0.0) + pnl
@@ -220,17 +275,27 @@ def run_paper_cycle(
             continue
 
         entry_px = _entry_price(quote, side)
-        contracts = contracts_for_notional(entry_px, limits.max_position_dollars)
+        requested_contracts = contracts_for_notional(entry_px, limits.max_position_dollars)
+        contracts, cap_reason = cap_contracts_to_top_of_book(
+            requested_contracts,
+            quote,
+            side,
+            action="entry",
+        )
+        if contracts < requested_contracts:
+            capped_entry_count += 1
         if contracts <= 0:
+            depth_skipped_count += 1
             continue
 
         pos_id = int(state.get("next_position_id", 1) or 1)
         state["next_position_id"] = pos_id + 1
 
         settlement_ts = raw.get("settlement_ts_utc") or (now_utc + timedelta(days=1)).isoformat()
+        settlement_dt = _parse_iso_utc(settlement_ts) or (now_utc + timedelta(days=1))
         max_hold_until = min(
             now_utc + timedelta(hours=config.MAX_HOLD_HOURS),
-            datetime.fromisoformat(str(settlement_ts)) - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
+            settlement_dt - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
         )
 
         pos = {
@@ -247,6 +312,9 @@ def run_paper_cycle(
             "status": "open",
             "threshold_f": float(raw.get("threshold_f", 0.0) or 0.0),
             "entry_ev_cents": ev_cents,
+            "requested_contracts": requested_contracts,
+            "capped_contracts": contracts,
+            "cap_reason": cap_reason,
         }
         open_positions.append(pos)
         opened_count += 1
@@ -263,6 +331,9 @@ def run_paper_cycle(
         "equity": float(state.get("equity", config.PAPER_ACCOUNT_SIZE) or config.PAPER_ACCOUNT_SIZE),
         "day_pnl": float(state.get("daily_pnl", {}).get(date_key, 0.0) or 0.0),
         "week_pnl": float(state.get("weekly_pnl", {}).get(week_key, 0.0) or 0.0),
+        "capped_entries": capped_entry_count,
+        "capped_exits": capped_exit_count,
+        "depth_skipped": depth_skipped_count,
     }
     _write_blotter_line(blotter_dir, date_key, summary)
     return summary

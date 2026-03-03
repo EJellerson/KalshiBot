@@ -133,6 +133,25 @@ def _latest_quotes_rows(limit: int) -> list[dict[str, Any]]:
 
 
 def _contracts_rows(limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for strategy_id in config.WEATHER_STRATEGY_IDS:
+        strategy_rows = _tail_parquet_rows(config.strategy_contracts_active_path(strategy_id), limit)
+        for row in strategy_rows:
+            if "strategy_id" not in row:
+                row["strategy_id"] = strategy_id
+        rows.extend(strategy_rows)
+    if rows:
+        rows.sort(
+            key=lambda r: str(
+                r.get("ts_utc")
+                or r.get("discovered_at_utc")
+                or r.get("settlement_ts_utc")
+                or r.get("ticker")
+                or ""
+            ),
+            reverse=True,
+        )
+        return rows[:limit]
     return _tail_parquet_rows(config.CONTRACTS_ACTIVE_PATH, limit)
 
 
@@ -436,6 +455,22 @@ def create_app() -> FastAPI:
     def _gui_prefix() -> str:
         return f"gui/{os.getuid()}"
 
+    def _run_launchctl(args: list[str], *, timeout: int = 10) -> tuple[bool, str, int | None]:
+        try:
+            result = subprocess.run(args, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False, "timeout", None
+        except OSError as exc:
+            return False, str(exc), None
+
+        if result.returncode == 0:
+            return True, "", 0
+
+        stderr = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
+        stdout = (result.stdout or b"").decode("utf-8", errors="ignore").strip()
+        detail = stderr or stdout or f"return_code={result.returncode}"
+        return False, detail, int(result.returncode)
+
     def _service_loaded(label: str) -> bool:
         try:
             r = subprocess.run(
@@ -520,27 +555,21 @@ def create_app() -> FastAPI:
         prefix = _gui_prefix()
         plist = str(_SCHEDULER_PLIST)
 
-        # Bootstrap (re-load the service definition)
-        subprocess.run(
-            ["launchctl", "bootstrap", prefix, plist],
-            capture_output=True, timeout=10,
-        )
-        # Enable
-        subprocess.run(
-            ["launchctl", "enable", f"{prefix}/{_SCHEDULER_LABEL}"],
-            capture_output=True, timeout=10,
-        )
-        # Kickstart
-        r = subprocess.run(
-            ["launchctl", "kickstart", "-k", f"{prefix}/{_SCHEDULER_LABEL}"],
-            capture_output=True, timeout=10,
-        )
-
-        ok = r.returncode == 0
-        return {
-            "ok": ok,
-            "action": "start-scheduler",
-            "message": "Scheduler started" if ok else f"Failed (rc={r.returncode})",
-        }
+        steps = [
+            ("bootstrap", ["launchctl", "bootstrap", prefix, plist]),
+            ("enable", ["launchctl", "enable", f"{prefix}/{_SCHEDULER_LABEL}"]),
+            ("kickstart", ["launchctl", "kickstart", "-k", f"{prefix}/{_SCHEDULER_LABEL}"]),
+        ]
+        for step_name, cmd in steps:
+            ok, detail, rc = _run_launchctl(cmd, timeout=10)
+            if not ok:
+                return {
+                    "ok": False,
+                    "action": "start-scheduler",
+                    "step": step_name,
+                    "error": detail,
+                    "return_code": rc,
+                }
+        return {"ok": True, "action": "start-scheduler", "message": "Scheduler started"}
 
     return app
