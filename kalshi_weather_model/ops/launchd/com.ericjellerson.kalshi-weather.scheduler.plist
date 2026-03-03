@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ericjellerson.kalshi-weather.scheduler</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ericjellerson/KalshiBot/kalshi_weather_model/ops/run_scheduler.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ericjellerson/KalshiBot/kalshi_weather_model</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/ericjellerson/KalshiBot/kalshi_weather_model/data/logs/launchd_scheduler.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/ericjellerson/KalshiBot/kalshi_weather_model/data/logs/launchd_scheduler.err.log</string>
+</dict>
+</plist>
+

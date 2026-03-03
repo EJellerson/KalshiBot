@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kalshi-weather-model"
+version = "0.1.0"
+description = "Self-contained Kalshi weather trading pipeline"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+  "requests>=2.31.0",
+  "pandas>=2.1.0",
+  "pyarrow>=14.0.0",
+  "python-dotenv>=1.0.1",
+  "schedule>=1.2.0",
+  "cryptography>=42.0.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+]
+
+[project.scripts]
+weather-arb = "weather_arb.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["weather_arb*"]

@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kalshi Weather Ops Dashboard</title>
+    <style>
+      :root {
+        --bg0: #091018;
+        --bg1: #0f1d2b;
+        --panel: #14283c;
+        --panel2: #1a334b;
+        --line: #2a4c6b;
+        --text: #e8f3fb;
+        --muted: #9cb6cc;
+        --good: #43c78e;
+        --bad: #ef6b6b;
+        --warn: #e7bc57;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        color: var(--text);
+        background:
+          radial-gradient(900px 500px at 90% -20%, #224566, transparent 65%),
+          radial-gradient(900px 600px at -20% 10%, #1c2e44, transparent 65%),
+          linear-gradient(180deg, var(--bg1), var(--bg0));
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      }
+      .wrap {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 22px;
+      }
+      .head {
+        display: flex;
+        justify-content: space-between;
+        align-items: end;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 32px;
+        letter-spacing: 0.3px;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .chips {
+        margin-top: 8px;
+      }
+      .chip {
+        display: inline-block;
+        margin-right: 8px;
+        margin-top: 6px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #1a3046;
+        font-size: 12px;
+      }
+      .grid {
+        display: grid;
+        gap: 12px;
+      }
+      .kpis {
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+      .card {
+        background: linear-gradient(165deg, var(--panel), var(--panel2));
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px;
+      }
+      .card h3 {
+        margin: 0 0 8px;
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+      }
+      .kpi {
+        font-size: 25px;
+        font-weight: 700;
+      }
+      .kpi.sm {
+        font-size: 19px;
+      }
+      .good {
+        color: var(--good);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      .warn {
+        color: var(--warn);
+      }
+      .sub {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .section {
+        margin-top: 14px;
+      }
+      .section h2 {
+        margin: 0 0 9px;
+        color: var(--muted);
+        font-size: 16px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        background: #15283b;
+      }
+      th, td {
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid #2a4a66;
+        font-size: 12px;
+        vertical-align: top;
+      }
+      th {
+        background: #213c55;
+        color: #b9cee0;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      .two {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: 1fr 1fr;
+      }
+      .progress {
+        width: 170px;
+        height: 8px;
+        border-radius: 999px;
+        border: 1px solid #3b5f7c;
+        background: #0f1e2b;
+        overflow: hidden;
+      }
+      .bar {
+        height: 100%;
+        background: linear-gradient(90deg, #49b37d, #7fd9af);
+      }
+      .err {
+        margin-top: 10px;
+        color: var(--bad);
+        font-size: 13px;
+      }
+      .alerts {
+        margin-top: 12px;
+      }
+      .alert {
+        padding: 10px 12px;
+        border-radius: 10px;
+        margin-bottom: 8px;
+        border: 1px solid transparent;
+        font-size: 13px;
+      }
+      .sev-critical {
+        background: rgba(239, 107, 107, 0.12);
+        border-color: rgba(239, 107, 107, 0.55);
+      }
+      .sev-warn {
+        background: rgba(231, 188, 87, 0.13);
+        border-color: rgba(231, 188, 87, 0.55);
+      }
+      .sev-info {
+        background: rgba(67, 199, 142, 0.1);
+        border-color: rgba(67, 199, 142, 0.45);
+      }
+      .status-pill {
+        display: inline-block;
+        margin-left: 7px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        font-size: 11px;
+      }
+      .mono {
+        font-family: "IBM Plex Mono", "Menlo", monospace;
+      }
+      @media (max-width: 1020px) {
+        .two {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="text/babel">
+      const { useEffect, useState } = React;
+
+      const money = (x) => Number(x || 0).toLocaleString(undefined, { style: "currency", currency: "USD" });
+      const pct = (x) => `${(Number(x || 0) * 100).toFixed(2)}%`;
+      const age = (mins) => (mins === null || mins === undefined || Number.isNaN(Number(mins)) ? "-" : `${Number(mins).toFixed(1)}m`);
+      const sevClass = (severity) => `sev-${(severity || "info").toLowerCase()}`;
+
+      async function getJSON(url) {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+        return await r.json();
+      }
+
+      function DataTable({ rows, preferredCols }) {
+        if (!rows || rows.length === 0) return <div className="meta">No rows</div>;
+        const cols = preferredCols && preferredCols.length > 0 ? preferredCols : Object.keys(rows[0] || {});
+        return (
+          <table>
+            <thead>
+              <tr>{cols.map((c) => <th key={c}>{c}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i}>
+                  {cols.map((c) => <td key={`${i}_${c}`}>{typeof row[c] === "object" ? JSON.stringify(row[c]) : String(row[c] ?? "")}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        );
+      }
+
+      function AlertsPanel({ alerts }) {
+        if (!alerts || alerts.length === 0) {
+          return <div className="alert sev-info">No active alerts. Pipeline appears healthy.</div>;
+        }
+        return (
+          <div className="alerts">
+            {alerts.map((a, idx) => (
+              <div key={idx} className={`alert ${sevClass(a.severity)}`}>
+                <span className="mono">{a.code}</span>: {a.message}
+              </div>
+            ))}
+          </div>
+        );
+      }
+
+      function TrainTable({ snapshot }) {
+        const cityStats = snapshot?.train_gate?.city_stats || {};
+        const daysRemaining = snapshot?.train_gate?.days_remaining_by_city || {};
+        const cities = Object.keys(cityStats);
+        if (cities.length === 0) return <div className="meta">No train-gate city stats yet.</div>;
+
+        const rows = cities
+          .map((city) => {
+            const s = cityStats[city] || {};
+            const coverage = Number(s.coverage_pct || 0);
+            return {
+              city,
+              obs_window: `${s.observations || 0}/${s.window_required_days || 0}`,
+              obs_total: s.observations_total || 0,
+              missing_window: s.missing_days_window || 0,
+              missing_pct: Number(s.missing_pct || 0),
+              days_remaining: Number(daysRemaining[city] || 0),
+              coverage,
+            };
+          })
+          .sort((a, b) => b.days_remaining - a.days_remaining);
+
+        return (
+          <table>
+            <thead>
+              <tr>
+                <th>City</th>
+                <th>Obs (Window)</th>
+                <th>Obs (Total)</th>
+                <th>Missing Days</th>
+                <th>Missing %</th>
+                <th>Days Remaining</th>
+                <th>Coverage</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.city}>
+                  <td>{r.city}</td>
+                  <td>{r.obs_window}</td>
+                  <td>{r.obs_total}</td>
+                  <td>{r.missing_window}</td>
+                  <td>{pct(r.missing_pct)}</td>
+                  <td className={r.days_remaining > 0 ? "warn" : "good"}>{r.days_remaining}</td>
+                  <td>
+                    <div className="progress">
+                      <div className="bar" style={{ width: `${Math.max(0, Math.min(100, r.coverage * 100))}%` }} />
+                    </div>
+                    <div className="sub">{pct(r.coverage)}</div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        );
+      }
+
+      function App() {
+        const [summary, setSummary] = useState(null);
+        const [monitor, setMonitor] = useState(null);
+        const [signals, setSignals] = useState([]);
+        const [events, setEvents] = useState([]);
+        const [err, setErr] = useState("");
+        const [lastRefresh, setLastRefresh] = useState(null);
+
+        const refresh = async () => {
+          try {
+            const [s, m, sig, ev] = await Promise.all([
+              getJSON("/api/summary"),
+              getJSON("/api/monitoring"),
+              getJSON("/api/signals?limit=30"),
+              getJSON("/api/governance/events?limit=40"),
+            ]);
+            setSummary(s);
+            setMonitor(m);
+            setSignals(sig.rows || []);
+            setEvents(ev.rows || []);
+            setErr("");
+            setLastRefresh(new Date().toLocaleTimeString());
+          } catch (e) {
+            setErr(e.message || "refresh failed");
+          }
+        };
+
+        useEffect(() => {
+          refresh();
+          const id = setInterval(refresh, 15000);
+          return () => clearInterval(id);
+        }, []);
+
+        const inv = monitor?.inventory || {};
+        const todayRows = inv.today_rows || {};
+        const train = monitor?.train_gate || {};
+        const gate = train.gate || {};
+        const runtime = monitor?.runtime || {};
+        const alerts = monitor?.alerts?.alerts || [];
+        const alertStatus = monitor?.alerts?.status || "ok";
+        const alertCounts = monitor?.alerts?.counts || {};
+        const lastByEvent = monitor?.events?.latest_by_event || {};
+        const eventAge = monitor?.events?.minutes_since_by_event || {};
+        const freshness = inv.freshness_threshold_minutes || {};
+        const streamAges = inv.stream_age_minutes || {};
+
+        const streamRows = ["forecasts", "observations", "quotes", "signals"].map((stream) => ({
+          stream,
+          files: inv[stream]?.files ?? 0,
+          rows: inv[stream]?.rows ?? 0,
+          latest_file: inv[stream]?.latest_file ?? "",
+          age_minutes: age(streamAges[stream]),
+          max_age: age(freshness[stream]),
+          stale: (inv.stale_streams || []).includes(stream) ? "YES" : "NO",
+        }));
+
+        const heartbeatRows = Object.entries(eventAge).map(([event, mins]) => ({
+          event,
+          age_minutes: age(mins),
+        }));
+
+        return (
+          <div className="wrap">
+            <div className="head">
+              <div>
+                <h1>Kalshi Weather Ops Dashboard</h1>
+                <div className="meta">Live view of data pipeline, gating, and scheduler heartbeat</div>
+                <div className="chips">
+                  <span className="chip">refresh 15s</span>
+                  <span className="chip">cycle {runtime.scheduler_interval_minutes ?? "-"}m</span>
+                  <span className="chip">obs sync {runtime.obs_sync_interval_minutes ?? "-"}m</span>
+                  <span className="chip">live routing: {summary?.live?.allow_live_trading ? "ON" : "OFF"}</span>
+                  <span className={`chip ${alertStatus === "critical" ? "bad" : alertStatus === "warn" ? "warn" : "good"}`}>ops: {alertStatus.toUpperCase()}</span>
+                </div>
+              </div>
+              <div className="meta">
+                Last refresh: {lastRefresh || "loading..."}
+                <br />
+                Champion: {summary?.registry?.champion_global || "none"}
+              </div>
+            </div>
+
+            <div className="section">
+              <h2>Operational Alerts</h2>
+              <AlertsPanel alerts={alerts} />
+            </div>
+
+            <div className="grid kpis">
+              <div className="card">
+                <h3>Train Gate</h3>
+                <div className={`kpi ${gate.pass ? "good" : "warn"}`}>{gate.pass ? "PASS" : "BLOCKED"}</div>
+                <div className="sub">ETA (local): {train.estimated_ready_date_local || "-"}</div>
+              </div>
+              <div className="card">
+                <h3>Days Remaining</h3>
+                <div className="kpi">{train.max_days_remaining ?? "-"}</div>
+                <div className="sub">max across tracked cities</div>
+              </div>
+              <div className="card">
+                <h3>Ops Alerts</h3>
+                <div className={`kpi sm ${alertStatus === "critical" ? "bad" : alertStatus === "warn" ? "warn" : "good"}`}>{alerts.length}</div>
+                <div className="sub">critical: {alertCounts.critical || 0}, warn: {alertCounts.warn || 0}</div>
+              </div>
+              <div className="card">
+                <h3>Contracts Active</h3>
+                <div className={`kpi ${Number(inv.contracts_active || 0) > 0 ? "good" : "bad"}`}>{inv.contracts_active ?? 0}</div>
+                <div className="sub">contract map age: {age(inv.contracts_age_minutes)}</div>
+              </div>
+              <div className="card">
+                <h3>Today Forecast Rows</h3>
+                <div className="kpi">{todayRows.forecasts ?? 0}</div>
+                <div className="sub">total: {inv.forecasts?.rows ?? 0}</div>
+              </div>
+              <div className="card">
+                <h3>Today Observation Rows</h3>
+                <div className="kpi">{todayRows.observations ?? 0}</div>
+                <div className="sub">total: {inv.observations?.rows ?? 0}</div>
+              </div>
+              <div className="card">
+                <h3>Today Signal Rows</h3>
+                <div className="kpi">{todayRows.signals ?? 0}</div>
+                <div className="sub">quotes today: {todayRows.quotes ?? 0}</div>
+              </div>
+              <div className="card">
+                <h3>Paper Equity</h3>
+                <div className="kpi sm">{money(summary?.paper?.equity)}</div>
+                <div className="sub">open: {summary?.paper?.open_positions ?? 0}, closed: {summary?.paper?.closed_positions ?? 0}</div>
+              </div>
+            </div>
+
+            <div className="section">
+              <h2>Train Gate Progress By City</h2>
+              <TrainTable snapshot={monitor} />
+              {!gate.pass && Array.isArray(gate.reasons) && gate.reasons.length > 0 && (
+                <div className="sub" style={{ marginTop: "8px" }}>Reasons: {gate.reasons.join(" | ")}</div>
+              )}
+            </div>
+
+            <div className="section two">
+              <div>
+                <h2>Pipeline Inventory and Freshness</h2>
+                <DataTable
+                  rows={streamRows}
+                  preferredCols={["stream", "files", "rows", "latest_file", "age_minutes", "max_age", "stale"]}
+                />
+              </div>
+              <div>
+                <h2>Scheduler Heartbeat (Event Recency)</h2>
+                <DataTable
+                  rows={heartbeatRows}
+                  preferredCols={["event", "age_minutes"]}
+                />
+              </div>
+            </div>
+
+            <div className="section two">
+              <div>
+                <h2>Latest Runtime Events</h2>
+                <DataTable
+                  rows={Object.entries(lastByEvent).map(([event, row]) => ({
+                    event,
+                    ts: row.ts || "",
+                    forecast_rows: row.forecast_rows ?? "",
+                    observation_rows: row.observation_rows ?? "",
+                    signals: row.signals ?? "",
+                    skipped_contracts: row.skipped_contracts ?? "",
+                    reason: row.reason ?? "",
+                  }))}
+                  preferredCols={["event", "ts", "forecast_rows", "observation_rows", "signals", "skipped_contracts", "reason"]}
+                />
+              </div>
+              <div>
+                <h2>Observation Day Coverage</h2>
+                <DataTable
+                  rows={Object.entries(inv.observation_unique_days_by_city || {}).map(([city, days]) => ({ city, days }))}
+                  preferredCols={["city", "days"]}
+                />
+              </div>
+            </div>
+
+            <div className="section two">
+              <div>
+                <h2>Recent Signals</h2>
+                <DataTable
+                  rows={signals}
+                  preferredCols={["generated_at_utc", "ticker", "city", "side", "p_fair", "p_mkt", "ev_cents", "min_ev_cents"]}
+                />
+              </div>
+              <div>
+                <h2>Recent Governance Log</h2>
+                <DataTable
+                  rows={events}
+                  preferredCols={["ts", "event", "model_id", "forecast_rows", "observation_rows", "signals", "reason"]}
+                />
+              </div>
+            </div>
+
+            {err && <div className="err">Error: {err}</div>}
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("app")).render(<App />);
+    </script>
+  </body>
+  </html>
