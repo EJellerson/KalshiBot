@@ -236,6 +236,7 @@ TRAIN_MAX_MISSING_PCT = 0.10
 WF_MIN_WINDOWS = 6
 WF_MIN_FEASIBLE_RATE = 0.60
 WF_MIN_MEDIAN_EV_DAY = 0.0
+WF_MIN_SIGNALS_PER_WINDOW = _env_int("WF_MIN_SIGNALS_PER_WINDOW", 3)
 
 BACKTEST_MIN_TRADES = 30
 BACKTEST_MIN_WIN_RATE = 0.54
@@ -312,6 +313,9 @@ LIVE_CONSECUTIVE_LOSS_HALT = 3
 # Live portfolio notional cap (fraction of account equity)
 LIVE_MAX_NOTIONAL_UTILIZATION = _env_float("LIVE_MAX_NOTIONAL_UTILIZATION", 0.60)
 
+# Tradable weather markets are expected to settle on a daily horizon.
+TRADABLE_SETTLEMENT_MAX_HOURS = _env_int("TRADABLE_SETTLEMENT_MAX_HOURS", 48)
+
 
 def strategy_root(strategy_id: str) -> Path:
     return STRATEGIES_DIR / str(strategy_id)
@@ -371,6 +375,10 @@ def strategy_paper_metrics_daily_path(strategy_id: str) -> Path:
 
 def strategy_runtime_cycle_path(strategy_id: str) -> Path:
     return strategy_runtime_dir(strategy_id) / "latest_cycle.json"
+
+
+def strategy_live_input_path(strategy_id: str) -> Path:
+    return strategy_runtime_dir(strategy_id) / "live_input.json"
 
 
 def strategy_runtime_liquidity_path(strategy_id: str) -> Path:

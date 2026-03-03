@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from weather_arb.execution.live_engine import run_live_cycle
+from weather_arb.execution.live_engine import _to_quote, run_live_cycle
 from weather_arb.utils.io_utils import safe_read_json
 
 
@@ -92,3 +92,20 @@ def test_run_live_cycle_places_order_when_live_routing_enabled(monkeypatch, tmp_
     assert out["opened"] == 1
     assert len(open_positions) == 1
     assert bool(open_positions[0].get("live_order_submitted", False)) is True
+
+
+def test_live_quote_fallback_is_timezone_aware():
+    quote = _to_quote(
+        {
+            "ticker": "TEST",
+            "yes_bid_dollars": 0.49,
+            "yes_ask_dollars": 0.50,
+            "no_bid_dollars": 0.49,
+            "no_ask_dollars": 0.50,
+            "yes_bid_size": 10,
+            "yes_ask_size": 10,
+            "no_bid_size": 10,
+            "no_ask_size": 10,
+        }
+    )
+    assert quote.ts_utc.tzinfo is not None

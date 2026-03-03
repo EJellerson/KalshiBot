@@ -21,14 +21,13 @@ def test_live_routing_manual_override(monkeypatch, tmp_path):
 
 def test_live_routing_auto_uses_strategy_champion(monkeypatch, tmp_path):
     champion_path = tmp_path / "champion_state.json"
-    registry_path = tmp_path / "model_registry.json"
 
     safe_write_json_atomic(champion_path, {"current_champion": "weather_temp_high"})
 
     monkeypatch.setattr("weather_arb.config.CHAMPION_STATE_PATH", champion_path)
-    monkeypatch.setattr("weather_arb.config.MODEL_REGISTRY_PATH", registry_path)
     monkeypatch.setattr("weather_arb.config.ALLOW_LIVE_TRADING", False)
     monkeypatch.setattr("weather_arb.config.LIVE_AUTO_ENABLE_ON_CHAMPION", True)
+    monkeypatch.setattr("weather_arb.config.TRADABLE_WEATHER_STRATEGIES", ["weather_temp_high", "weather_temp_low"])
 
     out = live_routing_status()
     assert out["enabled"] is True
@@ -38,35 +37,27 @@ def test_live_routing_auto_uses_strategy_champion(monkeypatch, tmp_path):
     assert out["source"] == "strategy_champion_state"
 
 
-def test_live_routing_auto_falls_back_to_model_registry(monkeypatch, tmp_path):
+def test_live_routing_auto_invalid_champion_fails_closed(monkeypatch, tmp_path):
     champion_path = tmp_path / "champion_state.json"
-    registry_path = tmp_path / "model_registry.json"
-
-    safe_write_json_atomic(
-        registry_path,
-        {
-            "champion_by_scope": {"global": "model_123"},
-        },
-    )
+    safe_write_json_atomic(champion_path, {"current_champion": "weather_unknown"})
 
     monkeypatch.setattr("weather_arb.config.CHAMPION_STATE_PATH", champion_path)
-    monkeypatch.setattr("weather_arb.config.MODEL_REGISTRY_PATH", registry_path)
     monkeypatch.setattr("weather_arb.config.ALLOW_LIVE_TRADING", False)
     monkeypatch.setattr("weather_arb.config.LIVE_AUTO_ENABLE_ON_CHAMPION", True)
+    monkeypatch.setattr("weather_arb.config.TRADABLE_WEATHER_STRATEGIES", ["weather_temp_high", "weather_temp_low"])
 
     out = live_routing_status()
-    assert out["enabled"] is True
-    assert out["auto_enabled"] is True
-    assert out["champion_id"] == "model_123"
-    assert out["source"] == "model_registry"
+    assert out["enabled"] is False
+    assert out["auto_enabled"] is False
+    assert out["champion_id"] is None
+    assert out["source"] == "champion_invalid"
+    assert out["reason"] == "invalid_champion_strategy"
 
 
 def test_live_routing_disabled_without_champion(monkeypatch, tmp_path):
     champion_path = tmp_path / "champion_state.json"
-    registry_path = tmp_path / "model_registry.json"
 
     monkeypatch.setattr("weather_arb.config.CHAMPION_STATE_PATH", champion_path)
-    monkeypatch.setattr("weather_arb.config.MODEL_REGISTRY_PATH", registry_path)
     monkeypatch.setattr("weather_arb.config.ALLOW_LIVE_TRADING", False)
     monkeypatch.setattr("weather_arb.config.LIVE_AUTO_ENABLE_ON_CHAMPION", True)
 

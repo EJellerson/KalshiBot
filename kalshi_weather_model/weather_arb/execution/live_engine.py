@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import json
@@ -45,7 +45,7 @@ def _week_key(now_utc: datetime) -> str:
 def _to_quote(raw: dict[str, Any]) -> MarketQuote:
     return MarketQuote(
         ticker=str(raw["ticker"]),
-        ts_utc=datetime.fromisoformat(str(raw.get("ts_utc") or datetime.utcnow().isoformat())),
+        ts_utc=datetime.fromisoformat(str(raw.get("ts_utc") or datetime.now(timezone.utc).isoformat())),
         yes_bid_dollars=float(raw["yes_bid_dollars"]),
         yes_ask_dollars=float(raw["yes_ask_dollars"]),
         no_bid_dollars=float(raw["no_bid_dollars"]),
@@ -59,6 +59,55 @@ def _to_quote(raw: dict[str, Any]) -> MarketQuote:
 
 def _entry_price(quote: MarketQuote, side: str) -> float:
     return quote.yes_ask_dollars if side == "buy_yes" else quote.no_ask_dollars
+
+
+def _exit_price(quote: MarketQuote, side: str) -> float:
+    return quote.yes_bid_dollars if side == "buy_yes" else quote.no_bid_dollars
+
+
+def _should_exit(pos: dict[str, Any], signal_map: dict[str, float], now_utc: datetime) -> bool:
+    ticker = str(pos.get("ticker", ""))
+    if ticker in signal_map and signal_map[ticker] <= config.EXIT_EV_CENTS:
+        return True
+
+    max_hold = datetime.fromisoformat(str(pos.get("max_hold_until_utc")))
+    if now_utc >= max_hold:
+        return True
+
+    settlement_ts = datetime.fromisoformat(str(pos.get("settlement_ts_utc")))
+    if now_utc >= settlement_ts - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS):
+        return True
+
+    return False
+
+
+def _close_side_from_position_side(position_side: str) -> str:
+    side = str(position_side or "").strip().lower()
+    if side == "buy_yes":
+        return "yes"
+    if side == "buy_no":
+        return "no"
+    raise ValueError(f"unsupported position side: {position_side}")
+
+
+def _exit_filled(broker_resp: dict[str, Any] | None) -> bool:
+    if not isinstance(broker_resp, dict):
+        return False
+    status_sources = [broker_resp, broker_resp.get("order"), broker_resp.get("data")]
+    status_value = ""
+    for source in status_sources:
+        if not isinstance(source, dict):
+            continue
+        status_value = str(source.get("status") or source.get("state") or "").strip().lower()
+        if status_value:
+            break
+    if status_value:
+        if status_value in {"executed", "filled", "complete", "completed", "closed", "matched"}:
+            return True
+        if status_value in {"open", "resting", "pending", "partially_filled", "cancelled", "canceled", "rejected"}:
+            return False
+    # Backward-compatible fallback for thin test doubles that don't include status.
+    return bool(broker_resp.get("ok", True))
 
 
 def _extract_first_float(payload: dict[str, Any], keys: list[str]) -> float | None:
@@ -163,6 +212,7 @@ def run_live_cycle(
         safe_write_json_atomic(state_path, state)
         return {
             "opened": 0,
+            "closed": 0,
             "blocked": True,
             "reason": "loss_stop",
             "limits": state.get("live_limits", {}),
@@ -171,6 +221,7 @@ def run_live_cycle(
         safe_write_json_atomic(state_path, state)
         return {
             "opened": 0,
+            "closed": 0,
             "blocked": True,
             "reason": "consecutive_loss_halt",
             "limits": state.get("live_limits", {}),
@@ -179,12 +230,105 @@ def run_live_cycle(
         safe_write_json_atomic(state_path, state)
         return {
             "opened": 0,
+            "closed": 0,
             "blocked": True,
             "reason": "live_routing_disabled",
             "limits": state.get("live_limits", {}),
         }
 
     open_positions = list(state.get("open_positions", []))
+    closed_positions = list(state.get("closed_positions", []))
+
+    signal_ev_map: dict[str, float] = {}
+    for raw in signals:
+        ticker = str(raw.get("ticker", ""))
+        signal_ev_map[ticker] = abs(float(raw.get("ev_cents", 0.0) or 0.0))
+
+    closed = 0
+    exit_order_events: list[dict[str, Any]] = []
+    kept_open: list[dict[str, Any]] = []
+    for pos in open_positions:
+        ticker = str(pos.get("ticker", ""))
+        quote_raw = quote_map.get(ticker)
+        if not quote_raw:
+            kept_open.append(pos)
+            continue
+        quote = _to_quote(quote_raw)
+        if not _should_exit(pos, signal_ev_map, now_utc):
+            kept_open.append(pos)
+            continue
+
+        side = str(pos.get("side", ""))
+        contracts = int(pos.get("contracts", 0) or 0)
+        if contracts <= 0:
+            kept_open.append(pos)
+            continue
+
+        exit_px = _exit_price(quote, side)
+        close_side = _close_side_from_position_side(side)
+        payload = {
+            "ticker": ticker,
+            "side": close_side,
+            "action": "sell",
+            "count": contracts,
+            "yes_price_dollars": exit_px if close_side == "yes" else None,
+            "no_price_dollars": exit_px if close_side == "no" else None,
+            "reduce_only": True,
+            "time_in_force": "fill_or_kill",
+        }
+        if auth_client is None:
+            raise RuntimeError("live routing enabled but no auth client was provided")
+        try:
+            broker_resp = auth_client.place_order(**payload)
+            filled = _exit_filled(broker_resp)
+            exit_error = ""
+        except Exception as exc:
+            broker_resp = {}
+            filled = False
+            exit_error = str(exc)
+
+        exit_order_events.append(
+            {
+                "ticker": ticker,
+                "position_id": pos.get("position_id"),
+                "side": close_side,
+                "contracts": contracts,
+                "exit_price": exit_px,
+                "filled": bool(filled),
+                "error": exit_error or None,
+            }
+        )
+        if not filled:
+            pending = dict(pos)
+            pending["pending_exit_submitted_at_utc"] = now_utc.isoformat()
+            pending["pending_exit_response"] = broker_resp or {}
+            if exit_error:
+                pending["pending_exit_error"] = exit_error
+            kept_open.append(pending)
+            continue
+
+        entry_px = float(pos.get("entry_price_dollars", 0.0) or 0.0)
+        fees = contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
+        pnl = (exit_px - entry_px) * contracts - fees
+        out = dict(pos)
+        out["status"] = "closed"
+        out["closed_at_utc"] = now_utc.isoformat()
+        out["close_price_dollars"] = exit_px
+        out["realized_pnl_dollars"] = float(pnl)
+        out["close_reason"] = "signal_or_time"
+        out["live_exit_order_response"] = broker_resp or {}
+        closed_positions.append(out)
+        closed += 1
+
+        state.setdefault("daily_pnl", {})[date_key] = float(state.get("daily_pnl", {}).get(date_key, 0.0) or 0.0) + pnl
+        state.setdefault("weekly_pnl", {})[week_key] = float(state.get("weekly_pnl", {}).get(week_key, 0.0) or 0.0) + pnl
+        state["equity"] = float(state.get("equity", config.LIVE_STARTING_EQUITY) or config.LIVE_STARTING_EQUITY) + pnl
+        if pnl < 0:
+            state["consecutive_losses"] = int(state.get("consecutive_losses", 0) or 0) + 1
+        else:
+            state["consecutive_losses"] = 0
+
+    open_positions = kept_open
     open_notional = sum(
         abs(float(p.get("entry_price_dollars", 0.0) or 0.0) * int(p.get("contracts", 0) or 0))
         for p in open_positions
@@ -204,14 +348,14 @@ def run_live_cycle(
         if ev_cents < float(raw.get("min_ev_cents", config.BOOTSTRAP_MIN_EV_CENTS)):
             continue
 
+        side = str(raw.get("side", "buy_yes"))
         quote_raw = quote_map.get(ticker)
         if not quote_raw:
             continue
         quote = _to_quote(quote_raw)
-        if not spread_ok(quote) or not depth_ok(quote):
+        if not spread_ok(quote, side=side) or not depth_ok(quote):
             continue
 
-        side = str(raw.get("side", "buy_yes"))
         entry_price = _entry_price(quote, side)
         contracts = contracts_for_notional(entry_price, limits.max_position_dollars)
         if contracts <= 0:
@@ -273,6 +417,7 @@ def run_live_cycle(
         )
 
     state["open_positions"] = open_positions
+    state["closed_positions"] = closed_positions
     safe_write_json_atomic(state_path, state)
 
     blotter_dir.mkdir(parents=True, exist_ok=True)
@@ -283,7 +428,9 @@ def run_live_cycle(
                 {
                     "ts": now_utc.isoformat(),
                     "opened": opened,
+                    "closed": closed,
                     "orders": order_events,
+                    "exit_orders": exit_order_events,
                     "limits": state.get("live_limits", {}),
                 },
                 default=str,
@@ -293,6 +440,8 @@ def run_live_cycle(
 
     return {
         "opened": opened,
+        "closed": closed,
         "orders": order_events,
+        "exit_orders": exit_order_events,
         "limits": state.get("live_limits", {}),
     }

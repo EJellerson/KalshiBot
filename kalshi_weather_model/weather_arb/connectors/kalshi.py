@@ -217,19 +217,37 @@ class KalshiAuthClient(KalshiPublicClient):
     def get_settlements(self, *, limit: int = 200) -> dict[str, Any]:
         return self.auth_request("GET", "/portfolio/settlements", params={"limit": limit})
 
+    @staticmethod
+    def _normalize_action_side(side: str, action: str | None = None) -> tuple[str, str]:
+        side_l = str(side or "").strip().lower()
+        action_l = str(action or "").strip().lower() if action is not None else ""
+
+        if side_l in {"buy_yes", "buy_no"}:
+            return "buy", "yes" if side_l.endswith("yes") else "no"
+        if side_l in {"sell_yes", "sell_no"}:
+            return "sell", "yes" if side_l.endswith("yes") else "no"
+        if side_l in {"yes", "no"}:
+            return (action_l or "buy"), side_l
+        raise ValueError(f"unsupported side value: {side}")
+
     def place_order(
         self,
         *,
         ticker: str,
         side: str,
+        action: str | None = None,
         count: int,
         yes_price_dollars: float | None = None,
         no_price_dollars: float | None = None,
         order_type: str = "limit",
+        reduce_only: bool | None = None,
+        time_in_force: str | None = None,
     ) -> dict[str, Any]:
+        normalized_action, normalized_side = self._normalize_action_side(side, action=action)
         payload: dict[str, Any] = {
             "ticker": ticker,
-            "action": side,
+            "action": normalized_action,
+            "side": normalized_side,
             "count": count,
             "type": order_type,
         }
@@ -237,6 +255,10 @@ class KalshiAuthClient(KalshiPublicClient):
             payload["yes_price_dollars"] = yes_price_dollars
         if no_price_dollars is not None:
             payload["no_price_dollars"] = no_price_dollars
+        if reduce_only is not None:
+            payload["reduce_only"] = bool(reduce_only)
+        if time_in_force:
+            payload["time_in_force"] = str(time_in_force)
         return self.auth_request("POST", "/portfolio/orders", json_body=payload)
 
 

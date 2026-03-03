@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from weather_arb.risk.limits import compute_hybrid_live_limits, resolve_live_limits_for_day
+from weather_arb.risk.limits import compute_hybrid_live_limits, resolve_live_limits_for_day, spread_ok
+from weather_arb.types import MarketQuote
 
 
 def test_compute_hybrid_live_limits_tiers():
@@ -40,3 +41,20 @@ def test_resolve_live_limits_daily_boundary_only():
     limits2, state2 = resolve_live_limits_for_day(2000, now, state1)
     assert limits1.max_position_dollars == limits2.max_position_dollars
     assert state2["last_limits_day"] == state1["last_limits_day"]
+
+
+def test_spread_ok_is_side_aware_for_buy_no():
+    quote = MarketQuote(
+        ticker="TEST",
+        ts_utc=datetime(2026, 3, 3, 14, 0, tzinfo=timezone.utc),
+        yes_bid_dollars=0.49,
+        yes_ask_dollars=0.50,  # tight yes spread (2%)
+        no_bid_dollars=0.20,
+        no_ask_dollars=0.50,  # wide no spread (60%)
+        yes_bid_size=20,
+        yes_ask_size=20,
+        no_bid_size=20,
+        no_ask_size=20,
+    )
+    assert spread_ok(quote, side="buy_yes") is True
+    assert spread_ok(quote, side="buy_no") is False

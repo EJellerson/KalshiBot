@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from weather_arb.model.contract_discovery import (
     classify_weather_strategy,
     discover_temperature_contracts,
@@ -134,6 +136,54 @@ def test_discover_weather_contracts_supports_precip_discovery_only():
         ]
     }
     contracts, skipped = discover_weather_contracts(payload)
+    assert not skipped
+    assert len(contracts) == 1
+    assert contracts[0].strategy_id == "weather_precip"
+
+
+def test_discover_tradable_rejects_settlement_horizon_exceeded():
+    now = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+    payload = {
+        "markets": [
+            _base_market(
+                settlement_time=(now + timedelta(hours=72)).isoformat().replace("+00:00", "Z"),
+            )
+        ]
+    }
+    contracts, skipped = discover_temperature_contracts(payload, now_utc=now)
+    assert contracts == []
+    assert any(s.get("reason") == "settlement_horizon_exceeded" for s in skipped)
+
+
+def test_discover_rejects_already_settled():
+    now = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+    payload = {
+        "markets": [
+            _base_market(
+                settlement_time=(now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            )
+        ]
+    }
+    contracts, skipped = discover_temperature_contracts(payload, now_utc=now)
+    assert contracts == []
+    assert any(s.get("reason") == "already_settled" for s in skipped)
+
+
+def test_discovery_only_weather_family_not_horizon_filtered():
+    now = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+    payload = {
+        "markets": [
+            {
+                "id": "m2",
+                "ticker": "KXRAINNYC-26MAR03-T1",
+                "event_ticker": "KXRAINNYC-26MAR03",
+                "title": "NYC precipitation above 1in",
+                "status": "open",
+                "settlement_time": (now + timedelta(days=10)).isoformat().replace("+00:00", "Z"),
+            }
+        ]
+    }
+    contracts, skipped = discover_weather_contracts(payload, now_utc=now)
     assert not skipped
     assert len(contracts) == 1
     assert contracts[0].strategy_id == "weather_precip"
