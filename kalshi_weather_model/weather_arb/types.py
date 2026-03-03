@@ -15,6 +15,11 @@ class ContractInfo:
     settlement_ts_utc: datetime
     contract_date_local: str
     status: str
+    strategy_id: str = "weather_temp_high"
+    family: str = "temperature"
+    comparator: str = "above"  # above | below | between | unknown
+    lower_f: float | None = None
+    upper_f: float | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 

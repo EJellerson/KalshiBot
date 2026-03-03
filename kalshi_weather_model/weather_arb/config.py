@@ -13,6 +13,7 @@ MARKET_QUOTES_DIR = DATA_DIR / "market_quotes"
 FORECAST_SNAPSHOTS_DIR = DATA_DIR / "forecast_snapshots"
 OBSERVATIONS_DIR = DATA_DIR / "observations"
 SIGNALS_DIR = DATA_DIR / "signals"
+STRATEGIES_DIR = DATA_DIR / "strategies"
 
 PAPER_DIR = DATA_DIR / "paper"
 LIVE_DIR = DATA_DIR / "live"
@@ -23,6 +24,7 @@ REPORTS_DIR = DATA_DIR / "reports"
 PAPER_POSITIONS_PATH = PAPER_DIR / "paper_positions.json"
 PAPER_METRICS_DAILY_PATH = PAPER_DIR / "paper_metrics_daily.json"
 PAPER_BLOTTER_DIR = PAPER_DIR / "paper_blotter"
+PAPER_SLEEVES_PATH = PAPER_DIR / "paper_sleeves.json"
 
 LIVE_POSITIONS_PATH = LIVE_DIR / "live_positions.json"
 LIVE_METRICS_DAILY_PATH = LIVE_DIR / "live_metrics_daily.json"
@@ -32,6 +34,8 @@ MODEL_REGISTRY_PATH = GOVERNANCE_DIR / "model_registry.json"
 LIFECYCLE_STATE_PATH = GOVERNANCE_DIR / "lifecycle_state.json"
 GOVERNANCE_LOG_PATH = GOVERNANCE_DIR / "governance_log.json"
 THRESHOLD_CONFIG_PATH = GOVERNANCE_DIR / "thresholds.json"
+PORTFOLIO_RANKINGS_PATH = GOVERNANCE_DIR / "portfolio_rankings.json"
+CHAMPION_STATE_PATH = GOVERNANCE_DIR / "champion_state.json"
 
 CONTRACTS_ACTIVE_PATH = CONTRACTS_DIR / "contracts_active.parquet"
 CONTRACTS_HISTORY_PATH = CONTRACTS_DIR / "contracts_history.parquet"
@@ -55,6 +59,16 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
 KALSHI_API_BASE_URL = os.getenv(
     "KALSHI_API_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2"
 )
@@ -66,6 +80,7 @@ NWS_USER_AGENT = os.getenv(
 )
 
 ALLOW_LIVE_TRADING = _env_flag("ALLOW_LIVE_TRADING", False)
+LIVE_AUTO_ENABLE_ON_CHAMPION = _env_flag("LIVE_AUTO_ENABLE_ON_CHAMPION", True)
 
 SCHEDULER_TZ = "America/New_York"
 SCHEDULER_INTERVAL_MINUTES = 15
@@ -122,6 +137,66 @@ CITY_CONFIG = {
         "lon": -122.3088,
     },
 }
+
+# Weather strategy roadmap
+TRADABLE_WEATHER_STRATEGIES = [
+    "weather_temp_high",
+    "weather_temp_low",
+    "weather_temp_bucket",
+]
+DISCOVERY_ONLY_WEATHER_STRATEGIES = [
+    "weather_precip",
+    "weather_snow",
+    "weather_wind",
+]
+WEATHER_STRATEGY_IDS = TRADABLE_WEATHER_STRATEGIES + DISCOVERY_ONLY_WEATHER_STRATEGIES
+
+WEATHER_STRATEGY_METADATA = {
+    "weather_temp_high": {"mode": "tradable", "variant": "temp_high"},
+    "weather_temp_low": {"mode": "tradable", "variant": "temp_low"},
+    "weather_temp_bucket": {"mode": "tradable", "variant": "temp_bucket"},
+    "weather_precip": {"mode": "discovery_only", "variant": "precip"},
+    "weather_snow": {"mode": "discovery_only", "variant": "snow"},
+    "weather_wind": {"mode": "discovery_only", "variant": "wind"},
+}
+
+# Contract quality and freshness controls
+STRATEGY_PARSE_RATE_MIN = _env_float("STRATEGY_PARSE_RATE_MIN", 0.70)
+STRATEGY_PARSE_ALERT_MIN_RAW = _env_int("STRATEGY_PARSE_ALERT_MIN_RAW", 25)
+STRATEGY_MIN_ELIGIBLE_CONTRACTS = _env_int("STRATEGY_MIN_ELIGIBLE_CONTRACTS", 1)
+STRATEGY_STALE_MULTIPLIER = _env_float("STRATEGY_STALE_MULTIPLIER", 3.0)
+
+# Liquidity gates (moderate)
+STRATEGY_LIQ_LOOKBACK_DAYS = _env_int("STRATEGY_LIQ_LOOKBACK_DAYS", 5)
+STRATEGY_LIQ_MAX_SPREAD_PCT = _env_float("STRATEGY_LIQ_MAX_SPREAD_PCT", 0.15)
+STRATEGY_LIQ_MIN_BOOK_SIZE = _env_int("STRATEGY_LIQ_MIN_BOOK_SIZE", 10)
+STRATEGY_LIQ_MIN_SNAPSHOTS = _env_int("STRATEGY_LIQ_MIN_SNAPSHOTS", 50)
+STRATEGY_DEQUAL_CONSEC_FAILS = _env_int("STRATEGY_DEQUAL_CONSEC_FAILS", 2)
+
+STRATEGY_BENCHMARK_MAX_AGE_MINUTES = {
+    "weather_temp_high": 180.0,
+    "weather_temp_low": 180.0,
+    "weather_temp_bucket": 180.0,
+    "weather_precip": 360.0,
+    "weather_snow": 360.0,
+    "weather_wind": 360.0,
+}
+
+# Portfolio ranking and promotion guards
+PORTFOLIO_TRAILING_DAYS = _env_int("PORTFOLIO_TRAILING_DAYS", 30)
+PORTFOLIO_SCORE_WEIGHTS = {
+    "ev_day": 0.40,
+    "drawdown": 0.30,
+    "consistency": 0.20,
+    "data_health": 0.10,
+}
+PORTFOLIO_MIN_SCORE_DELTA = _env_float("PORTFOLIO_MIN_SCORE_DELTA", 5.0)
+PORTFOLIO_MAX_DRAWDOWN_DELTA = _env_float("PORTFOLIO_MAX_DRAWDOWN_DELTA", 0.03)
+PROMOTION_MIN_TRADING_DAYS = _env_int("PROMOTION_MIN_TRADING_DAYS", 20)
+PROMOTION_MIN_TRADES = _env_int("PROMOTION_MIN_TRADES", 30)
+AUTO_PROMOTION_ENABLED = _env_flag("AUTO_PROMOTION_ENABLED", False)
+LIVE_HANDOFF_ENABLED = _env_flag("LIVE_HANDOFF_ENABLED", False)
+LIVE_HANDOFF_MAX_DRAIN_HOURS = _env_int("LIVE_HANDOFF_MAX_DRAIN_HOURS", 24)
 
 # Lifecycle / registry
 MODEL_REGISTRY_SCHEMA_VERSION = "weather_v1"
@@ -238,6 +313,74 @@ LIVE_CONSECUTIVE_LOSS_HALT = 3
 LIVE_MAX_NOTIONAL_UTILIZATION = _env_float("LIVE_MAX_NOTIONAL_UTILIZATION", 0.60)
 
 
+def strategy_root(strategy_id: str) -> Path:
+    return STRATEGIES_DIR / str(strategy_id)
+
+
+def strategy_contracts_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "contracts"
+
+
+def strategy_quotes_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "quotes"
+
+
+def strategy_signals_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "signals"
+
+
+def strategy_benchmarks_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "benchmarks"
+
+
+def strategy_paper_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "paper"
+
+
+def strategy_eval_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "eval"
+
+
+def strategy_reports_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "reports"
+
+
+def strategy_runtime_dir(strategy_id: str) -> Path:
+    return strategy_root(strategy_id) / "runtime"
+
+
+def strategy_contracts_active_path(strategy_id: str) -> Path:
+    return strategy_contracts_dir(strategy_id) / "contracts_active.parquet"
+
+
+def strategy_contracts_history_path(strategy_id: str) -> Path:
+    return strategy_contracts_dir(strategy_id) / "contracts_history.parquet"
+
+
+def strategy_benchmark_latest_path(strategy_id: str) -> Path:
+    return strategy_benchmarks_dir(strategy_id) / "latest.json"
+
+
+def strategy_paper_positions_path(strategy_id: str) -> Path:
+    return strategy_paper_dir(strategy_id) / "paper_positions.json"
+
+
+def strategy_paper_metrics_daily_path(strategy_id: str) -> Path:
+    return strategy_paper_dir(strategy_id) / "paper_metrics_daily.json"
+
+
+def strategy_runtime_cycle_path(strategy_id: str) -> Path:
+    return strategy_runtime_dir(strategy_id) / "latest_cycle.json"
+
+
+def strategy_runtime_liquidity_path(strategy_id: str) -> Path:
+    return strategy_runtime_dir(strategy_id) / "liquidity_state.json"
+
+
+def strategy_runtime_gates_path(strategy_id: str) -> Path:
+    return strategy_runtime_dir(strategy_id) / "gates.json"
+
+
 def ensure_dirs() -> None:
     for path in [
         DATA_DIR,
@@ -247,6 +390,7 @@ def ensure_dirs() -> None:
         FORECAST_SNAPSHOTS_DIR,
         OBSERVATIONS_DIR,
         SIGNALS_DIR,
+        STRATEGIES_DIR,
         PAPER_DIR,
         LIVE_DIR,
         GOVERNANCE_DIR,
@@ -256,3 +400,18 @@ def ensure_dirs() -> None:
         LIVE_BLOTTER_DIR,
     ]:
         path.mkdir(parents=True, exist_ok=True)
+
+    for strategy_id in WEATHER_STRATEGY_IDS:
+        for path in [
+            strategy_root(strategy_id),
+            strategy_contracts_dir(strategy_id),
+            strategy_quotes_dir(strategy_id),
+            strategy_signals_dir(strategy_id),
+            strategy_benchmarks_dir(strategy_id),
+            strategy_paper_dir(strategy_id),
+            strategy_eval_dir(strategy_id),
+            strategy_reports_dir(strategy_id),
+            strategy_runtime_dir(strategy_id),
+            strategy_paper_dir(strategy_id) / "paper_blotter",
+        ]:
+            path.mkdir(parents=True, exist_ok=True)

@@ -84,10 +84,17 @@ def _sync_live_equity_from_api(
     state: dict[str, Any],
     now_utc: datetime,
     auth_client: KalshiAuthClient | None,
+    *,
+    live_routing_enabled: bool | None = None,
 ) -> dict[str, Any]:
+    effective_live_routing = (
+        bool(config.ALLOW_LIVE_TRADING)
+        if live_routing_enabled is None
+        else bool(live_routing_enabled)
+    )
     if not config.LIVE_EQUITY_SYNC_ENABLED:
         return state
-    if not config.ALLOW_LIVE_TRADING or auth_client is None:
+    if not effective_live_routing or auth_client is None:
         return state
 
     today_key = day_key_in_zone(now_utc, config.SCHEDULER_TZ)
@@ -130,9 +137,20 @@ def run_live_cycle(
     auth_client: KalshiAuthClient | None = None,
     state_path: Path = config.LIVE_POSITIONS_PATH,
     blotter_dir: Path = config.LIVE_BLOTTER_DIR,
+    live_routing_enabled: bool | None = None,
 ) -> dict[str, Any]:
+    effective_live_routing = (
+        bool(config.ALLOW_LIVE_TRADING)
+        if live_routing_enabled is None
+        else bool(live_routing_enabled)
+    )
     state = read_or_create_json(state_path, _default_live_state())
-    state = _sync_live_equity_from_api(state, now_utc, auth_client)
+    state = _sync_live_equity_from_api(
+        state,
+        now_utc,
+        auth_client,
+        live_routing_enabled=effective_live_routing,
+    )
     equity = float(state.get("equity", config.LIVE_STARTING_EQUITY) or config.LIVE_STARTING_EQUITY)
     limits, state = resolve_live_limits_for_day(equity, now_utc, state, tz_name=config.SCHEDULER_TZ)
 
@@ -155,6 +173,14 @@ def run_live_cycle(
             "opened": 0,
             "blocked": True,
             "reason": "consecutive_loss_halt",
+            "limits": state.get("live_limits", {}),
+        }
+    if not effective_live_routing:
+        safe_write_json_atomic(state_path, state)
+        return {
+            "opened": 0,
+            "blocked": True,
+            "reason": "live_routing_disabled",
             "limits": state.get("live_limits", {}),
         }
 
@@ -197,9 +223,9 @@ def run_live_cycle(
 
         placed = False
         broker_resp: dict[str, Any] | None = None
-        if config.ALLOW_LIVE_TRADING:
+        if effective_live_routing:
             if auth_client is None:
-                raise RuntimeError("ALLOW_LIVE_TRADING=1 but no auth client was provided")
+                raise RuntimeError("live routing enabled but no auth client was provided")
             payload = {
                 "ticker": ticker,
                 "side": side,
