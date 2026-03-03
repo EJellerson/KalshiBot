@@ -77,6 +77,9 @@ def _gate_result_path(name: str) -> Path:
     return config.EVAL_DIR / f"{name}_latest.json"
 
 
+MAX_GOVERNANCE_LOG_EVENTS = 10_000
+
+
 def _load_or_init_daily_metrics(path: Path) -> dict[str, Any]:
     return read_or_create_json(path, {"by_day": {}, "updated_at": None})
 
@@ -95,6 +98,8 @@ def _load_thresholds() -> dict[str, Any]:
 def _append_governance_log(event: dict[str, Any]) -> None:
     payload = read_or_create_json(config.GOVERNANCE_LOG_PATH, {"events": []})
     payload.setdefault("events", []).append(event)
+    if len(payload["events"]) > MAX_GOVERNANCE_LOG_EVENTS:
+        payload["events"] = payload["events"][-MAX_GOVERNANCE_LOG_EVENTS:]
     payload["updated_at"] = _utc_now().isoformat(timespec="seconds")
     safe_write_json_atomic(config.GOVERNANCE_LOG_PATH, payload)
 
@@ -291,7 +296,7 @@ def _build_signals_and_quotes(now_utc: datetime) -> tuple[list[dict[str, Any]], 
     noaa = NOAAClient()
 
     market_payload, _discovery_meta = _load_discovery_payload(public_client, now_utc)
-    contracts, skipped = discover_temperature_contracts(market_payload)
+    contracts, skipped = discover_temperature_contracts(market_payload, now_utc=now_utc)
 
     active_rows = contracts_to_frame(contracts).to_dict(orient="records") if contracts else []
     write_contract_snapshots(active_rows, active_rows)
@@ -545,7 +550,7 @@ def cmd_discover_contracts(_args: argparse.Namespace) -> None:
     now = _utc_now()
     client = KalshiPublicClient()
     payload, discovery_meta = _load_discovery_payload(client, now)
-    contracts, skipped = discover_temperature_contracts(payload)
+    contracts, skipped = discover_temperature_contracts(payload, now_utc=now)
     active_rows = contracts_to_frame(contracts).to_dict(orient="records") if contracts else []
     write_contract_snapshots(active_rows, active_rows)
     print(
@@ -884,15 +889,17 @@ def cmd_governance_eval(_args: argparse.Namespace) -> None:
 
 def cmd_live_cycle(_args: argparse.Namespace) -> None:
     live_status = live_routing_status()
-    champion = _latest_model_for_status("champion_live")
+    champion_model = _latest_model_for_status("champion_live")
     strategy_champion = str(live_status.get("champion_id") or "").strip()
+    tradable_strategies = set(config.TRADABLE_WEATHER_STRATEGIES)
 
-    if champion is None and not strategy_champion:
+    if champion_model is None and not strategy_champion:
+        reason = "invalid_champion_strategy" if str(live_status.get("reason")) == "invalid_champion_strategy" else "no_live_champion_selected"
         print(
             json.dumps(
                 {
                     "skipped": True,
-                    "reason": "no_live_champion_selected",
+                    "reason": reason,
                     "live_routing": live_status,
                 },
                 indent=2,
@@ -901,7 +908,107 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
         return
 
     now = _utc_now()
-    signals, quote_map, skipped = _build_signals_and_quotes(now)
+    if not strategy_champion:
+        out = {
+            "skipped": True,
+            "reason": "no_strategy_champion_selected",
+            "live_routing": live_status,
+            "model_champion_id": champion_model.get("model_id") if champion_model else None,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if strategy_champion not in tradable_strategies:
+        out = {
+            "skipped": True,
+            "reason": "invalid_champion_strategy",
+            "strategy_champion": strategy_champion,
+            "live_routing": live_status,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    live_input = safe_read_json(config.strategy_live_input_path(strategy_champion)) or {}
+    if not live_input:
+        out = {
+            "skipped": True,
+            "reason": "strategy_live_input_missing",
+            "strategy_champion": strategy_champion,
+            "live_routing": live_status,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    live_input_strategy = str(live_input.get("strategy_id") or "").strip()
+    if live_input_strategy and live_input_strategy != strategy_champion:
+        out = {
+            "skipped": True,
+            "reason": "strategy_live_input_mismatch",
+            "strategy_champion": strategy_champion,
+            "artifact_strategy_id": live_input_strategy,
+            "live_routing": live_status,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    ts_raw = str(live_input.get("ts_utc") or "").strip()
+    if not ts_raw:
+        out = {
+            "skipped": True,
+            "reason": "strategy_live_input_missing_timestamp",
+            "strategy_champion": strategy_champion,
+            "live_routing": live_status,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+    try:
+        artifact_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+    except Exception:
+        out = {
+            "skipped": True,
+            "reason": "strategy_live_input_bad_timestamp",
+            "strategy_champion": strategy_champion,
+            "live_routing": live_status,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if artifact_ts.tzinfo is None:
+        artifact_ts = artifact_ts.replace(tzinfo=timezone.utc)
+    age_minutes = max(0.0, (now - artifact_ts.astimezone(timezone.utc)).total_seconds() / 60.0)
+    max_age_minutes = float(config.SCHEDULER_INTERVAL_MINUTES * 2)
+    if age_minutes > max_age_minutes:
+        out = {
+            "skipped": True,
+            "reason": "strategy_live_input_stale",
+            "strategy_champion": strategy_champion,
+            "artifact_age_minutes": round(age_minutes, 2),
+            "max_age_minutes": max_age_minutes,
+            "live_routing": live_status,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    if not bool(live_input.get("entry_allowed", False)):
+        out = {
+            "skipped": True,
+            "reason": "strategy_entry_gate_blocked",
+            "strategy_champion": strategy_champion,
+            "blocked_reasons": list(live_input.get("blocked_reasons") or []),
+            "live_routing": live_status,
+        }
+        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    signals = list(live_input.get("signals") or [])
+    quote_map = dict(live_input.get("quote_map") or {})
+    skipped = []
     append_quote_rows(list(quote_map.values()), now)
     append_signal_rows(signals, now)
 
@@ -940,9 +1047,9 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
         config.LIVE_METRICS_DAILY_PATH,
         starting_equity=config.LIVE_STARTING_EQUITY,
     )
-    if champion is not None:
-        baseline = dict(champion.get("paper_metrics") or {})
-        degradation = lifecycle.apply_live_degradation(str(champion["model_id"]), baseline, current)
+    if champion_model is not None:
+        baseline = dict(champion_model.get("paper_metrics") or {})
+        degradation = lifecycle.apply_live_degradation(str(champion_model["model_id"]), baseline, current)
     else:
         degradation = {"skipped": True, "reason": "no_champion_live_model"}
 
@@ -954,7 +1061,8 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
         "live_mode_enabled": live_enabled,
         "live_routing": live_status,
         "strategy_champion": strategy_champion or None,
-        "model_champion_id": champion.get("model_id") if champion else None,
+        "model_champion_id": champion_model.get("model_id") if champion_model else None,
+        "artifact_age_minutes": round(age_minutes, 2),
     }
     _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
     print(json.dumps(out, indent=2, default=str))

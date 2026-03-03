@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from weather_arb import config
 from weather_arb.config import CITY_CONFIG
 from weather_arb.types import ContractInfo
 from weather_arb.utils.time_utils import parse_iso_datetime
@@ -257,10 +258,15 @@ def discover_weather_contracts(
     payload: dict[str, Any],
     *,
     allowed_strategy_ids: set[str] | None = None,
+    now_utc: datetime | None = None,
 ) -> tuple[list[ContractInfo], list[dict[str, Any]]]:
     markets = _extract_markets(payload)
     contracts: list[ContractInfo] = []
     skipped: list[dict[str, Any]] = []
+    now = now_utc
+    if now is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    tradable = set(config.TRADABLE_WEATHER_STRATEGIES)
 
     for raw in markets:
         ticker = str(raw.get("ticker") or "").strip()
@@ -284,6 +290,14 @@ def discover_weather_contracts(
         if settlement_ts is None:
             skipped.append({"ticker": ticker, "reason": "settlement_time_missing", "strategy_id": strategy_id})
             continue
+        if now is not None and settlement_ts <= now:
+            skipped.append({"ticker": ticker, "reason": "already_settled", "strategy_id": strategy_id})
+            continue
+        if now is not None and strategy_id in tradable:
+            horizon_hours = (settlement_ts - now).total_seconds() / 3600.0
+            if horizon_hours > float(config.TRADABLE_SETTLEMENT_MAX_HOURS):
+                skipped.append({"ticker": ticker, "reason": "settlement_horizon_exceeded", "strategy_id": strategy_id})
+                continue
 
         city_tz = str(CITY_CONFIG[city]["tz"])
         contract_date_local = _extract_contract_date_local(raw, city_tz, settlement_ts)
@@ -334,10 +348,15 @@ def discover_weather_contracts(
     return contracts, skipped
 
 
-def discover_temperature_contracts(payload: dict[str, Any]) -> tuple[list[ContractInfo], list[dict[str, Any]]]:
+def discover_temperature_contracts(
+    payload: dict[str, Any],
+    *,
+    now_utc: datetime | None = None,
+) -> tuple[list[ContractInfo], list[dict[str, Any]]]:
     return discover_weather_contracts(
         payload,
         allowed_strategy_ids={"weather_temp_high", "weather_temp_low", "weather_temp_bucket"},
+        now_utc=now_utc,
     )
 
 

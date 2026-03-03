@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import json
@@ -49,7 +49,7 @@ def _exit_price(quote: MarketQuote, side: str) -> float:
 def _to_quote(raw: dict[str, Any]) -> MarketQuote:
     return MarketQuote(
         ticker=str(raw["ticker"]),
-        ts_utc=datetime.fromisoformat(str(raw.get("ts_utc") or datetime.utcnow().isoformat())),
+        ts_utc=datetime.fromisoformat(str(raw.get("ts_utc") or datetime.now(timezone.utc).isoformat())),
         yes_bid_dollars=float(raw["yes_bid_dollars"]),
         yes_ask_dollars=float(raw["yes_ask_dollars"]),
         no_bid_dollars=float(raw["no_bid_dollars"]),
@@ -65,6 +65,11 @@ def _should_exit(pos: dict[str, Any], signal_map: dict[str, float], now_utc: dat
     ticker = str(pos.get("ticker", ""))
     if ticker in signal_map and signal_map[ticker] <= config.EXIT_EV_CENTS:
         return True
+
+    return _should_exit_time_only(pos, now_utc)
+
+
+def _should_exit_time_only(pos: dict[str, Any], now_utc: datetime) -> bool:
 
     max_hold = datetime.fromisoformat(str(pos.get("max_hold_until_utc")))
     if now_utc >= max_hold:
@@ -137,6 +142,30 @@ def run_paper_cycle(
         ticker = str(pos.get("ticker", ""))
         quote_raw = quote_map.get(ticker)
         if not quote_raw:
+            if _should_exit_time_only(pos, now_utc):
+                contracts = int(pos.get("contracts", 0) or 0)
+                entry_px = float(pos.get("entry_price_dollars", 0.0) or 0.0)
+                fees = contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
+                pnl = -fees
+
+                out = dict(pos)
+                out["status"] = "closed"
+                out["closed_at_utc"] = now_utc.isoformat()
+                out["close_price_dollars"] = entry_px
+                out["realized_pnl_dollars"] = float(pnl)
+                out["close_reason"] = "timeout_no_quote"
+                closed_positions.append(out)
+                closed_count += 1
+
+                state.setdefault("daily_pnl", {})[date_key] = float(state.get("daily_pnl", {}).get(date_key, 0.0) or 0.0) + pnl
+                state.setdefault("weekly_pnl", {})[week_key] = float(state.get("weekly_pnl", {}).get(week_key, 0.0) or 0.0) + pnl
+                state["equity"] = float(state.get("equity", config.PAPER_ACCOUNT_SIZE) or config.PAPER_ACCOUNT_SIZE) + pnl
+
+                if pnl < 0:
+                    state["consecutive_losses"] = int(state.get("consecutive_losses", 0) or 0) + 1
+                else:
+                    state["consecutive_losses"] = 0
+                continue
             kept_open.append(pos)
             continue
         quote = _to_quote(quote_raw)
@@ -182,14 +211,14 @@ def run_paper_cycle(
         if ev_cents < float(raw.get("min_ev_cents", config.BOOTSTRAP_MIN_EV_CENTS)):
             continue
 
+        side = str(raw.get("side", "buy_yes"))
         quote_raw = quote_map.get(ticker)
         if not quote_raw:
             continue
         quote = _to_quote(quote_raw)
-        if not spread_ok(quote) or not depth_ok(quote):
+        if not spread_ok(quote, side=side) or not depth_ok(quote):
             continue
 
-        side = str(raw.get("side", "buy_yes"))
         entry_px = _entry_price(quote, side)
         contracts = contracts_for_notional(entry_px, limits.max_position_dollars)
         if contracts <= 0:

@@ -59,12 +59,21 @@ def _patch_config_paths(monkeypatch, tmp_path: Path) -> None:
     config.ensure_dirs()
 
 
-def _write_quotes(strategy_id: str, now_utc: datetime, *, spread: float, depth: int, n: int = 60) -> None:
+def _write_quotes(
+    strategy_id: str,
+    now_utc: datetime,
+    *,
+    spread: float,
+    depth: int,
+    n: int = 60,
+    depths: tuple[int, int, int, int] | None = None,
+) -> None:
     rows = []
     yes_bid = 0.50
     yes_ask = yes_bid + spread
     no_bid = 1.0 - yes_ask
     no_ask = 1.0 - yes_bid
+    size_tuple = depths or (depth, depth, depth, depth)
     for i in range(n):
         rows.append(
             {
@@ -74,10 +83,10 @@ def _write_quotes(strategy_id: str, now_utc: datetime, *, spread: float, depth: 
                 "yes_ask_dollars": yes_ask,
                 "no_bid_dollars": no_bid,
                 "no_ask_dollars": no_ask,
-                "yes_bid_size": depth,
-                "yes_ask_size": depth,
-                "no_bid_size": depth,
-                "no_ask_size": depth,
+                "yes_bid_size": size_tuple[0],
+                "yes_ask_size": size_tuple[1],
+                "no_bid_size": size_tuple[2],
+                "no_ask_size": size_tuple[3],
             }
         )
 
@@ -91,7 +100,7 @@ def test_liquidity_gate_pass_then_dequal(monkeypatch, tmp_path):
     strategy_id = "weather_temp_high"
     base = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
 
-    _write_quotes(strategy_id, base, spread=0.08, depth=12)
+    _write_quotes(strategy_id, base, spread=0.06, depth=12)
     first = runtime._compute_liquidity_state(strategy_id, base)
     assert first["qualified"] is True
 
@@ -142,6 +151,136 @@ def test_entry_gate_fail_closed_conditions():
     assert allowed2 is False
     assert "discovery_only" in reasons2
     assert checks2["tradable"] is False
+
+
+def test_liquidity_uses_worst_side_depth(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now_utc = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+
+    _write_quotes(
+        strategy_id,
+        now_utc,
+        spread=0.08,
+        depth=12,
+        depths=(12, 12, 12, 1),
+    )
+    out = runtime._compute_liquidity_state(strategy_id, now_utc)
+    last_window = dict(out.get("last_window") or {})
+
+    assert float(last_window.get("median_depth", 0.0) or 0.0) == 1.0
+    assert out["qualified"] is False
+
+
+def test_wf_feasibility_requires_min_signals_per_window(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    monkeypatch.setattr(config, "WF_MIN_WINDOWS", 6)
+    monkeypatch.setattr(config, "WF_MIN_SIGNALS_PER_WINDOW", 3)
+
+    base = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
+    rows = []
+    for d in range(6):
+        day = base + timedelta(days=d)
+        for i in range(2):  # below threshold of 3
+            rows.append(
+                {
+                    "ticker": f"T{d}_{i}",
+                    "generated_at_utc": (day + timedelta(hours=i)).isoformat(timespec="seconds"),
+                    "ev_cents": 12.0,
+                }
+            )
+
+    pd.DataFrame(rows).to_parquet(config.strategy_signals_dir(strategy_id) / "signals_2026-02-06.parquet", index=False)
+    safe_write_json_atomic(
+        config.strategy_runtime_cycle_path(strategy_id),
+        {
+            "entry_gate": {
+                "checks": {
+                    "parse_ok": True,
+                    "freshness_ok": True,
+                    "benchmark_ok": True,
+                    "liquidity_ok": True,
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(runtime, "evaluate_train_gate", lambda _x: {"pass": True, "reasons": []})
+    monkeypatch.setattr(runtime, "evaluate_backtest_gate", lambda _x: {"pass": True, "reasons": []})
+    monkeypatch.setattr(runtime, "evaluate_paper_gates", lambda _x: (True, True, []))
+
+    out = runtime.evaluate_strategy_gates(strategy_id, now_utc=datetime(2026, 2, 8, tzinfo=timezone.utc))
+    assert out["wf"]["details"]["windows"] == 6
+    assert out["wf"]["details"]["feasible_rate"] == 0.0
+    assert out["wf"]["pass"] is False
+
+
+def test_run_strategy_cycle_persists_live_input_artifact(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+
+    class _ResidualModel:
+        def p_exceeds(self, **_kwargs):
+            return 0.8
+
+    class _FakePublicClient:
+        def get_market_orderbook(self, _ticker: str):
+            return {"orderbook": []}
+
+    monkeypatch.setattr(
+        runtime,
+        "parse_dollar_orderbook",
+        lambda _raw, ticker: {
+            "ticker": ticker,
+            "yes_bid_dollars": 0.49,
+            "yes_ask_dollars": 0.50,
+            "no_bid_dollars": 0.49,
+            "no_ask_dollars": 0.50,
+            "yes_bid_size": 25,
+            "yes_ask_size": 25,
+            "no_bid_size": 25,
+            "no_ask_size": 25,
+        },
+    )
+    monkeypatch.setattr(runtime, "_compute_liquidity_state", lambda *_args, **_kwargs: {"qualified": True})
+    monkeypatch.setattr(
+        runtime,
+        "run_paper_cycle",
+        lambda *_args, **_kwargs: {"opened": 0, "closed": 0, "open_positions": 0, "equity": 1000.0},
+    )
+
+    payload = {
+        "markets": [
+            {
+                "id": "m1",
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "event_ticker": "KXHIGHNYC-26MAR03",
+                "title": "NYC highest temperature above 75F",
+                "status": "open",
+                "settlement_time": "2026-03-03T23:00:00Z",
+            }
+        ]
+    }
+    context = runtime.StrategyContext(
+        forecast_extremes={"NYC": {"2026-03-03": {"max_f": 80.0, "min_f": 60.0}}},
+        residual_model=_ResidualModel(),
+        thresholds={"global_min_ev_cents": 6.0, "by_city": {"NYC": 6.0}},
+    )
+
+    out = runtime.run_strategy_cycle(
+        strategy_id,
+        now_utc=now,
+        market_payload=payload,
+        public_client=_FakePublicClient(),
+        context=context,
+    )
+    live_input = runtime.safe_read_json(config.strategy_live_input_path(strategy_id)) or {}
+
+    assert out["signals"]["count"] == 1
+    assert live_input["strategy_id"] == strategy_id
+    assert isinstance(live_input.get("signals"), list) and len(live_input["signals"]) == 1
+    assert "KXHIGHNYC-26MAR03-T75" in dict(live_input.get("quote_map") or {})
 
 
 def test_portfolio_leaderboard_is_deterministic(monkeypatch, tmp_path):

@@ -394,9 +394,9 @@ def _compute_liquidity_state(strategy_id: str, now_utc: datetime) -> dict[str, A
         no_mid = max((no_ask + no_bid) / 2.0, 1e-9)
         yes_spread = max(yes_ask - yes_bid, 0.0) / yes_mid
         no_spread = max(no_ask - no_bid, 0.0) / no_mid
-        spreads.append(min(yes_spread, no_spread))
+        spreads.append(max(yes_spread, no_spread))
 
-        depth = max(
+        depth = min(
             int(row.get("yes_bid_size", 0) or 0),
             int(row.get("yes_ask_size", 0) or 0),
             int(row.get("no_bid_size", 0) or 0),
@@ -731,7 +731,11 @@ def run_strategy_cycle(
     if payload is None:
         payload, discovery_meta = load_market_payload(client, now)
 
-    contracts, skipped = discover_weather_contracts(payload, allowed_strategy_ids={strategy_id})
+    contracts, skipped = discover_weather_contracts(
+        payload,
+        allowed_strategy_ids={strategy_id},
+        now_utc=now,
+    )
     active_rows = contracts_to_frame(contracts).to_dict(orient="records") if contracts else []
 
     if active_rows:
@@ -892,6 +896,19 @@ def run_strategy_cycle(
         day_metrics["date_key"] = day_key
         _write_daily_metrics(config.strategy_paper_metrics_daily_path(strategy_id), day_key, day_metrics)
 
+        # Live routing consumes this artifact directly; keep executable signal + quote payload fail-closed.
+        safe_write_json_atomic(
+            config.strategy_live_input_path(strategy_id),
+            {
+                "strategy_id": strategy_id,
+                "ts_utc": now.isoformat(timespec="seconds"),
+                "signals": signals,
+                "quote_map": quote_map,
+                "entry_allowed": bool(entry_allowed),
+                "blocked_reasons": blocked_reasons,
+            },
+        )
+
     alerts = _variant_alerts(
         strategy_id=strategy_id,
         contract_quality=contract_quality,
@@ -1043,7 +1060,7 @@ def evaluate_strategy_gates(strategy_id: str, now_utc: datetime | None = None) -
                 windows.append(
                     {
                         "window": day,
-                        "feasible": len(grp) > 0,
+                        "feasible": len(grp) >= int(config.WF_MIN_SIGNALS_PER_WINDOW),
                         "ev_day": float(grp["ev_cents"].mean() / 100.0),
                     }
                 )

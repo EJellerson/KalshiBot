@@ -94,11 +94,17 @@ def paper_limits() -> RiskLimits:
     )
 
 
-def spread_ok(quote: MarketQuote) -> bool:
-    if quote.yes_ask_dollars <= 0:
-        return False
-    spread = max(0.0, quote.yes_ask_dollars - quote.yes_bid_dollars)
-    spread_pct = spread / max(quote.yes_ask_dollars, 1e-9)
+def spread_ok(quote: MarketQuote, side: str = "buy_yes") -> bool:
+    if side == "buy_no":
+        if quote.no_ask_dollars <= 0:
+            return False
+        spread = max(0.0, quote.no_ask_dollars - quote.no_bid_dollars)
+        spread_pct = spread / max(quote.no_ask_dollars, 1e-9)
+    else:
+        if quote.yes_ask_dollars <= 0:
+            return False
+        spread = max(0.0, quote.yes_ask_dollars - quote.yes_bid_dollars)
+        spread_pct = spread / max(quote.yes_ask_dollars, 1e-9)
     return spread_pct <= config.MAX_SPREAD_PCT
 
 

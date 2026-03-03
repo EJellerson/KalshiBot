@@ -44,24 +44,36 @@ def _parquet_row_count(path: Path) -> int:
 
 def _chart_data() -> dict[str, Any]:
     """Build all three chart series for the Overview tab."""
-    payload = safe_read_json(config.PAPER_METRICS_DAILY_PATH) or {}
-    by_day: dict[str, Any] = payload.get("by_day", {})
+    by_day_totals: dict[str, float] = {}
+    for strategy_id in config.TRADABLE_WEATHER_STRATEGIES:
+        payload = safe_read_json(config.strategy_paper_metrics_daily_path(strategy_id)) or {}
+        by_day: dict[str, Any] = dict(payload.get("by_day", {}))
+        for day_key, metrics in by_day.items():
+            pnl = float((metrics or {}).get("pnl_dollars", 0.0) or 0.0)
+            by_day_totals[day_key] = float(by_day_totals.get(day_key, 0.0) + pnl)
+
+    sleeves = safe_read_json(config.PAPER_SLEEVES_PATH) or {}
+    default_initial = float(config.PAPER_ACCOUNT_SIZE) / max(len(config.WEATHER_STRATEGY_IDS), 1)
+    initial_sleeve = float(sleeves.get("initial_sleeve_equity", default_initial) or default_initial)
+    starting_equity = initial_sleeve * float(len(config.TRADABLE_WEATHER_STRATEGIES))
 
     equity_series: list[dict[str, Any]] = []
     pnl_series: list[dict[str, Any]] = []
 
-    if by_day:
-        running = float(config.PAPER_ACCOUNT_SIZE)
-        for day_key in sorted(by_day.keys()):
-            day_pnl = float(by_day[day_key].get("pnl_dollars", 0) or 0)
+    if by_day_totals:
+        running = starting_equity
+        for day_key in sorted(by_day_totals.keys()):
+            day_pnl = float(by_day_totals.get(day_key, 0.0) or 0.0)
             running += day_pnl
             equity_series.append({"date": day_key, "equity": round(running, 2)})
             pnl_series.append({"date": day_key, "pnl": round(day_pnl, 2)})
 
-    signal_series: list[dict[str, Any]] = []
-    for path in sorted(config.SIGNALS_DIR.glob("signals_*.parquet")):
-        date_part = path.stem.replace("signals_", "", 1)
-        signal_series.append({"date": date_part, "count": _parquet_row_count(path)})
+    signal_counts: dict[str, int] = {}
+    for strategy_id in config.WEATHER_STRATEGY_IDS:
+        for path in sorted(config.strategy_signals_dir(strategy_id).glob("signals_*.parquet")):
+            date_part = path.stem.replace("signals_", "", 1)
+            signal_counts[date_part] = int(signal_counts.get(date_part, 0) + _parquet_row_count(path))
+    signal_series = [{"date": day, "count": signal_counts[day]} for day in sorted(signal_counts.keys())]
 
     return {
         "equity_curve": equity_series,
@@ -101,17 +113,23 @@ def _tail_json_events(path: Path, limit: int) -> list[dict[str, Any]]:
 
 
 def _latest_signal_rows(limit: int) -> list[dict[str, Any]]:
-    files = sorted(config.SIGNALS_DIR.glob("signals_*.parquet"))
-    if not files:
-        return []
-    return _tail_parquet_rows(files[-1], limit)
+    rows: list[dict[str, Any]] = []
+    for strategy_id in config.WEATHER_STRATEGY_IDS:
+        files = sorted(config.strategy_signals_dir(strategy_id).glob("signals_*.parquet"))
+        for path in files[-3:]:
+            rows.extend(_tail_parquet_rows(path, limit))
+    rows.sort(key=lambda r: str(r.get("generated_at_utc") or r.get("ts_utc") or ""), reverse=True)
+    return rows[:limit]
 
 
 def _latest_quotes_rows(limit: int) -> list[dict[str, Any]]:
-    files = sorted(config.MARKET_QUOTES_DIR.glob("quotes_*.parquet"))
-    if not files:
-        return []
-    return _tail_parquet_rows(files[-1], limit)
+    rows: list[dict[str, Any]] = []
+    for strategy_id in config.WEATHER_STRATEGY_IDS:
+        files = sorted(config.strategy_quotes_dir(strategy_id).glob("quotes_*.parquet"))
+        for path in files[-3:]:
+            rows.extend(_tail_parquet_rows(path, limit))
+    rows.sort(key=lambda r: str(r.get("ts_utc") or ""), reverse=True)
+    return rows[:limit]
 
 
 def _contracts_rows(limit: int) -> list[dict[str, Any]]:
