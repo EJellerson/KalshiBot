@@ -29,6 +29,7 @@ from weather_arb.execution.metrics import compute_day_metrics, max_drawdown_from
 from weather_arb.execution.paper_engine import run_paper_cycle
 from weather_arb.execution.settlement import apply_settlements_to_positions, parse_settlements_payload
 from weather_arb.governance import lifecycle, model_registry
+from weather_arb.governance.live_routing import live_routing_status
 from weather_arb.model.contract_discovery import contracts_to_frame, discover_temperature_contracts
 from weather_arb.model.fair_value import (
     SeasonalResidualModel,
@@ -45,6 +46,17 @@ from weather_arb.pipeline.ingest import (
 )
 from weather_arb.pipeline.scheduler import SchedulerHooks, WeatherScheduler
 from weather_arb.reporting.daily_report import generate_daily_report
+from weather_arb.strategies import (
+    compute_portfolio_leaderboard,
+    contract_health_snapshot,
+    evaluate_all_strategy_gates,
+    evaluate_strategy_gates,
+    migrate_legacy_artifacts,
+    portfolio_promote,
+    run_all_strategies_cycle,
+    run_strategy_cycle,
+    strategies_summary_snapshot,
+)
 from weather_arb.utils.io_utils import read_or_create_json, safe_read_json, safe_write_json_atomic
 from weather_arb.utils.time_utils import day_key_in_zone
 
@@ -310,8 +322,13 @@ def _build_signals_and_quotes(now_utc: datetime) -> tuple[list[dict[str, Any]], 
         if contract.contract_date_local not in day_map:
             continue
 
-        raw_book = public_client.get_market_orderbook(contract.ticker)
-        parsed = parse_dollar_orderbook(raw_book, contract.ticker)
+        try:
+            raw_book = public_client.get_market_orderbook(contract.ticker)
+            parsed = parse_dollar_orderbook(raw_book, contract.ticker)
+        except Exception as exc:
+            skipped.append({"ticker": contract.ticker, "reason": f"orderbook_unavailable: {exc}"})
+            continue
+
         parsed["ts_utc"] = now_utc.isoformat()
         quote_rows.append(parsed)
 
@@ -519,7 +536,9 @@ def cmd_bootstrap(_args: argparse.Namespace) -> None:
     station_map_path = config.CONFIG_DIR / "station_city_map.json"
     if not station_map_path.exists():
         station_map_path.write_text(json.dumps(config.CITY_CONFIG, indent=2), encoding="utf-8")
-    print(f"bootstrap complete at {config.ROOT_DIR}")
+
+    migration_report = migrate_legacy_artifacts()
+    print(json.dumps({"bootstrap": str(config.ROOT_DIR), "migration": migration_report}, indent=2))
 
 
 def cmd_discover_contracts(_args: argparse.Namespace) -> None:
@@ -775,6 +794,62 @@ def cmd_paper_cycle(_args: argparse.Namespace) -> None:
     print(json.dumps(out, indent=2))
 
 
+def cmd_strategy_run(args: argparse.Namespace) -> dict[str, Any]:
+    now = _utc_now()
+    if bool(getattr(args, "all", False)):
+        out = run_all_strategies_cycle(now)
+        _append_governance_log({"ts": now.isoformat(), "event": "strategy_cycle_all", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return out
+
+    strategy_id = str(getattr(args, "strategy", "weather_temp_high") or "weather_temp_high")
+    result = run_strategy_cycle(strategy_id, now_utc=now)
+    out = {"ts_utc": now.isoformat(timespec="seconds"), "count": 1, "results": {strategy_id: result}}
+    _append_governance_log({"ts": now.isoformat(), "event": "strategy_cycle", "strategy_id": strategy_id, "result": result})
+    print(json.dumps(out, indent=2, default=str))
+    return out
+
+
+def cmd_strategy_gates(args: argparse.Namespace) -> dict[str, Any]:
+    now = _utc_now()
+    if bool(getattr(args, "all", False)):
+        out = evaluate_all_strategy_gates(now)
+        _append_governance_log({"ts": now.isoformat(), "event": "strategy_gates_all", **out})
+        print(json.dumps(out, indent=2, default=str))
+        return out
+
+    strategy_id = str(getattr(args, "strategy", "weather_temp_high") or "weather_temp_high")
+    result = evaluate_strategy_gates(strategy_id, now_utc=now)
+    out = {"ts_utc": now.isoformat(timespec="seconds"), "results": {strategy_id: result}}
+    _append_governance_log({"ts": now.isoformat(), "event": "strategy_gates", "strategy_id": strategy_id, "result": result})
+    print(json.dumps(out, indent=2, default=str))
+    return out
+
+
+def cmd_contract_health(args: argparse.Namespace) -> dict[str, Any]:
+    strategy_id = str(getattr(args, "strategy", "weather_temp_high") or "weather_temp_high")
+    out = contract_health_snapshot(strategy_id)
+    print(json.dumps(out, indent=2, default=str))
+    return out
+
+
+def cmd_portfolio_rank(_args: argparse.Namespace) -> dict[str, Any]:
+    now = _utc_now()
+    out = compute_portfolio_leaderboard(now)
+    _append_governance_log({"ts": now.isoformat(), "event": "portfolio_rank", **out})
+    print(json.dumps(out, indent=2, default=str))
+    return out
+
+
+def cmd_portfolio_promote(args: argparse.Namespace) -> dict[str, Any]:
+    now = _utc_now()
+    force = bool(getattr(args, "force", False))
+    out = portfolio_promote(now, force=force)
+    _append_governance_log({"ts": now.isoformat(), "event": "portfolio_promote", **out})
+    print(json.dumps(out, indent=2, default=str))
+    return out
+
+
 def cmd_governance_eval(_args: argparse.Namespace) -> None:
     model = (
         _latest_model_for_status("qualified")
@@ -808,9 +883,21 @@ def cmd_governance_eval(_args: argparse.Namespace) -> None:
 
 
 def cmd_live_cycle(_args: argparse.Namespace) -> None:
+    live_status = live_routing_status()
     champion = _latest_model_for_status("champion_live")
-    if not champion:
-        print(json.dumps({"skipped": True, "reason": "no champion_live model"}, indent=2))
+    strategy_champion = str(live_status.get("champion_id") or "").strip()
+
+    if champion is None and not strategy_champion:
+        print(
+            json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "no_live_champion_selected",
+                    "live_routing": live_status,
+                },
+                indent=2,
+            )
+        )
         return
 
     now = _utc_now()
@@ -818,8 +905,15 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
     append_quote_rows(list(quote_map.values()), now)
     append_signal_rows(signals, now)
 
-    auth_client = KalshiAuthClient() if config.ALLOW_LIVE_TRADING else None
-    summary = run_live_cycle(signals, quote_map, now, auth_client=auth_client)
+    live_enabled = bool(live_status.get("enabled", False))
+    auth_client = KalshiAuthClient() if live_enabled else None
+    summary = run_live_cycle(
+        signals,
+        quote_map,
+        now,
+        auth_client=auth_client,
+        live_routing_enabled=live_enabled,
+    )
 
     # Settlement reconciliation when auth is available.
     if auth_client is not None:
@@ -842,23 +936,28 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
     metrics["date_key"] = _date_key_now()
     _write_daily_metrics(config.LIVE_METRICS_DAILY_PATH, _date_key_now(), metrics)
 
-    baseline = dict(champion.get("paper_metrics") or {})
     current = _aggregate_gate_metrics(
         config.LIVE_METRICS_DAILY_PATH,
         starting_equity=config.LIVE_STARTING_EQUITY,
     )
-    degradation = lifecycle.apply_live_degradation(str(champion["model_id"]), baseline, current)
+    if champion is not None:
+        baseline = dict(champion.get("paper_metrics") or {})
+        degradation = lifecycle.apply_live_degradation(str(champion["model_id"]), baseline, current)
+    else:
+        degradation = {"skipped": True, "reason": "no_champion_live_model"}
 
     out = {
         "summary": summary,
         "signals": len(signals),
         "skipped_contracts": len(skipped),
         "degradation": degradation,
-        "live_mode_enabled": config.ALLOW_LIVE_TRADING,
+        "live_mode_enabled": live_enabled,
+        "live_routing": live_status,
+        "strategy_champion": strategy_champion or None,
+        "model_champion_id": champion.get("model_id") if champion else None,
     }
     _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
     print(json.dumps(out, indent=2, default=str))
-
 
 def cmd_report(args: argparse.Namespace) -> None:
     date_key = args.date or _date_key_now()
@@ -932,11 +1031,14 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
 def cmd_scheduler(_args: argparse.Namespace) -> None:
     hooks = SchedulerHooks(
         ingest_hook=lambda: cmd_ingest_forecasts(argparse.Namespace()),
-        cycle_hook=lambda: cmd_paper_cycle(argparse.Namespace()),
+        cycle_hook=lambda: cmd_strategy_run(argparse.Namespace(all=True, strategy=None)),
         obs_sync_hook=lambda: cmd_sync_observations(argparse.Namespace()),
-        gate_eval_hook=lambda: cmd_run_daily_gates(argparse.Namespace()),
+        gate_eval_hook=lambda: cmd_strategy_gates(argparse.Namespace(all=True, strategy=None)),
         settlement_hook=lambda: cmd_live_cycle(argparse.Namespace()),
-        governance_hook=lambda: cmd_governance_eval(argparse.Namespace()),
+        governance_hook=lambda: (
+            cmd_portfolio_rank(argparse.Namespace()),
+            cmd_portfolio_promote(argparse.Namespace(force=False)),
+        ),
         calibration_hook=lambda: cmd_calibrate(argparse.Namespace()),
     )
     scheduler = WeatherScheduler(hooks)
@@ -963,6 +1065,24 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("run-backtest-gate")
     sub.add_parser("run-daily-gates")
     sub.add_parser("paper-cycle")
+
+    p_strategy_run = sub.add_parser("strategy-run")
+    g_run = p_strategy_run.add_mutually_exclusive_group(required=True)
+    g_run.add_argument("--strategy", choices=config.WEATHER_STRATEGY_IDS)
+    g_run.add_argument("--all", action="store_true")
+
+    p_strategy_gates = sub.add_parser("strategy-gates")
+    g_gates = p_strategy_gates.add_mutually_exclusive_group(required=True)
+    g_gates.add_argument("--strategy", choices=config.WEATHER_STRATEGY_IDS)
+    g_gates.add_argument("--all", action="store_true")
+
+    p_contract_health = sub.add_parser("contract-health")
+    p_contract_health.add_argument("--strategy", required=True, choices=config.WEATHER_STRATEGY_IDS)
+
+    sub.add_parser("portfolio-rank")
+    p_portfolio_promote = sub.add_parser("portfolio-promote")
+    p_portfolio_promote.add_argument("--force", action="store_true")
+
     sub.add_parser("governance-eval")
     sub.add_parser("live-cycle")
     sub.add_parser("api-check")
@@ -995,6 +1115,11 @@ def main() -> None:
         "run-backtest-gate": cmd_run_backtest_gate,
         "run-daily-gates": cmd_run_daily_gates,
         "paper-cycle": cmd_paper_cycle,
+        "strategy-run": cmd_strategy_run,
+        "strategy-gates": cmd_strategy_gates,
+        "contract-health": cmd_contract_health,
+        "portfolio-rank": cmd_portfolio_rank,
+        "portfolio-promote": cmd_portfolio_promote,
         "governance-eval": cmd_governance_eval,
         "live-cycle": cmd_live_cycle,
         "api-check": cmd_api_check,

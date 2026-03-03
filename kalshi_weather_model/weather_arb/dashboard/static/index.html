@@ -1082,6 +1082,29 @@
         const streamAges = inv.stream_age_minutes || {};
         const prev = prevSummary.current;
 
+        const strategySummaryRows = summary?.strategies?.rows || [];
+        const leaderboard = summary?.portfolio?.leaderboard || {};
+        const leaderboardRows = leaderboard?.rows || [];
+        const championState = summary?.portfolio?.champion || {};
+        const championId = championState?.current_champion || summary?.registry?.champion_global || null;
+        const shadowLeaderId = leaderboardRows?.[0]?.strategy_id || null;
+        const eligibleCount = leaderboardRows.filter((r) => !!r.eligible).length;
+        const infoAlerts = monitor?.variant_alerts_info?.alerts || [];
+        const suppression = monitor?.alert_suppression || {};
+
+        const strategyById = Object.fromEntries(strategySummaryRows.map((r) => [r.strategy_id, r]));
+        const mergedLeaderboardRows = leaderboardRows.map((r) => {
+          const s = strategyById[r.strategy_id] || {};
+          return {
+            ...r,
+            eligible: r.eligible ? "YES" : "NO",
+            stage: s.stage || "-",
+            entry_allowed: s.entry_allowed ? "YES" : "NO",
+            blocked_reasons: (s.blocked_reasons || []).join(" | "),
+            benchmark_fresh: s.benchmark_fresh === undefined ? "-" : (s.benchmark_fresh ? "YES" : "NO"),
+          };
+        });
+
         const streamColorRules = {
           stale: (v) => (v === "YES" ? "bad" : v === "NO" ? "good" : ""),
           age_minutes: (v) => {
@@ -1090,6 +1113,19 @@
             return num > 30 ? "warn" : "";
           },
         };
+
+        const leaderboardColorRules = {
+          eligible: (v) => (v === "YES" ? "good" : "warn"),
+          entry_allowed: (v) => (v === "YES" ? "good" : "warn"),
+          benchmark_fresh: (v) => (v === "YES" ? "good" : "warn"),
+          drawdown: (v) => (Number(v || 0) < -0.06 ? "bad" : ""),
+          ev_day: (v) => (Number(v || 0) > 0 ? "good" : ""),
+        };
+
+        const suppressionRows = Object.entries(suppression?.by_reason || {}).map(([reason, count]) => ({
+          reason,
+          count,
+        }));
 
         const streamRows = ["forecasts", "observations", "quotes", "signals"].map((stream) => ({
           stream,
@@ -1133,7 +1169,7 @@
                   Server: {serverTs ? new Date(serverTs).toLocaleTimeString() : "-"}
                 </div>
                 <div style={{ marginTop: "2px" }}>
-                  Champion: {summary?.registry?.champion_global || "none"}
+                  Champion: {championId || `none (shadow: ${shadowLeaderId || "-"})`}
                 </div>
                 <div className="ops-controls">
                   <button
@@ -1231,6 +1267,37 @@
                   <AlertsPanel alerts={alerts} />
                 </div>
 
+                <div className="section">
+                  <h2>Champion and Shadow Ranking</h2>
+                  <div className="grid kpis">
+                    <div className="card">
+                      <h3>Live Champion</h3>
+                      <div className={`kpi sm ${championId ? "good" : "warn"}`}>{championId || "none"}</div>
+                      <div className="sub">auto promotion: {summary?.portfolio?.leaderboard?.auto_promotion_enabled ? "ON" : "OFF"}</div>
+                    </div>
+                    <div className="card">
+                      <h3>Shadow Leader</h3>
+                      <div className="kpi sm blue">{shadowLeaderId || "-"}</div>
+                      <div className="sub">top ranked even if not eligible yet</div>
+                    </div>
+                    <div className="card">
+                      <h3>Eligible Strategies</h3>
+                      <div className={`kpi ${eligibleCount > 0 ? "good" : "warn"}`}>{eligibleCount}</div>
+                      <div className="sub">must pass all gates + data health</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="section">
+                  <h2>Strategy Leaderboard (Shadow Mode)</h2>
+                  <DataTable
+                    rows={mergedLeaderboardRows}
+                    preferredCols={["rank", "strategy_id", "score", "eligible", "stage", "entry_allowed", "benchmark_fresh", "trading_days", "trades", "ev_day", "drawdown", "blocked_reasons"]}
+                    emptyMessage="No strategy leaderboard yet"
+                    colorRules={leaderboardColorRules}
+                  />
+                </div>
+
                 {/* ── Charts ────────────────────────────────── */}
                 <div className="chart-grid">
                   <ChartCard
@@ -1324,7 +1391,8 @@
                     </div>
                     <div className="sub">
                       open: {summary?.live?.open_positions ?? 0}, closed: {summary?.live?.closed_positions ?? 0}
-                      {summary?.live?.allow_live_trading === false && <span> | routing OFF</span>}
+                      {summary?.live?.allow_live_trading === false && <span> | routing OFF ({summary?.live?.routing_reason || "no_reason"})</span>}
+                      {summary?.live?.allow_live_trading === true && summary?.live?.routing_champion && <span> | champion: {summary?.live?.routing_champion}</span>}
                     </div>
                   </div>
                 </div>
@@ -1405,6 +1473,39 @@
             {/* ── Governance Tab ──────────────────────────── */}
             {tab === "governance" && (
               <>
+                <div className="section">
+                  <h2>Suppressed/Informational Diagnostics</h2>
+                  <AlertsPanel alerts={infoAlerts} />
+                  <div className="sub" style={{ marginTop: "8px" }}>
+                    Suppressed from Overview: {suppression?.count || 0}
+                  </div>
+                  <div style={{ marginTop: "8px" }}>
+                    <DataTable
+                      rows={suppressionRows}
+                      preferredCols={["reason", "count"]}
+                      emptyMessage="No suppression reasons"
+                    />
+                  </div>
+                </div>
+
+                <div className="section">
+                  <h2>Strategy Stages and Blockers</h2>
+                  <DataTable
+                    rows={strategySummaryRows.map((r) => ({
+                      strategy_id: r.strategy_id,
+                      mode: r.mode,
+                      stage: r.stage,
+                      entry_allowed: r.entry_allowed ? "YES" : "NO",
+                      benchmark_fresh: r.benchmark_fresh ? "YES" : "NO",
+                      blocked_reasons: (r.blocked_reasons || []).join(" | "),
+                      latest_cycle_ts_utc: r.latest_cycle_ts_utc || "",
+                    }))}
+                    preferredCols={["strategy_id", "mode", "stage", "entry_allowed", "benchmark_fresh", "blocked_reasons", "latest_cycle_ts_utc"]}
+                    emptyMessage="No strategy summary yet"
+                    colorRules={leaderboardColorRules}
+                  />
+                </div>
+
                 <div className="section">
                   <h2>Latest Runtime Events</h2>
                   <DataTable

@@ -17,8 +17,28 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def make_model_id(run_id: str, label_key: str, task_mode: str, scope_key: str = "global") -> str:
-    return f"{run_id}:{label_key}:{task_mode}:{scope_key}"
+def _infer_strategy_id(entry: dict[str, Any]) -> str:
+    existing = str(entry.get("strategy_id") or "").strip()
+    if existing:
+        return existing
+    label_key = str(entry.get("label_key") or "").strip().lower()
+    if label_key in {"weather_temp", "weather_temp_high"}:
+        return "weather_temp_high"
+    if label_key == "weather_temp_low":
+        return "weather_temp_low"
+    if label_key == "weather_temp_bucket":
+        return "weather_temp_bucket"
+    return "weather_temp_high"
+
+
+def make_model_id(
+    run_id: str,
+    label_key: str,
+    task_mode: str,
+    scope_key: str = "global",
+    strategy_id: str = "weather_temp_high",
+) -> str:
+    return f"{run_id}:{strategy_id}:{label_key}:{task_mode}:{scope_key}"
 
 
 def _default_registry(scopes: list[str] | None = None) -> dict[str, Any]:
@@ -45,8 +65,42 @@ def _validate_transition(old_status: str, new_status: str) -> None:
         raise ValueError(f"invalid status transition {old_status} -> {new_status}")
 
 
+def _migrate_registry_if_needed(registry: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    changed = False
+    if str(registry.get("schema_version") or "") != MODEL_REGISTRY_SCHEMA_VERSION:
+        registry["schema_version"] = MODEL_REGISTRY_SCHEMA_VERSION
+        changed = True
+
+    models = list(registry.get("models") or [])
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        strategy_id = _infer_strategy_id(model)
+        if str(model.get("strategy_id") or "") != strategy_id:
+            model["strategy_id"] = strategy_id
+            changed = True
+        if "paper_metrics" not in model:
+            model["paper_metrics"] = {}
+            changed = True
+        if "paper_eval_count" not in model:
+            model["paper_eval_count"] = 0
+            changed = True
+        if "gate_results" not in model:
+            model["gate_results"] = {}
+            changed = True
+        if "data_health" not in model:
+            model["data_health"] = {}
+            changed = True
+
+    return registry, changed
+
+
 def load_registry(path=MODEL_REGISTRY_PATH) -> dict[str, Any]:
-    return read_or_create_json(path, _default_registry())
+    registry = read_or_create_json(path, _default_registry())
+    registry, changed = _migrate_registry_if_needed(registry)
+    if changed:
+        save_registry(registry, path)
+    return registry
 
 
 def save_registry(registry: dict[str, Any], path=MODEL_REGISTRY_PATH) -> None:
@@ -66,6 +120,7 @@ def register_model(
     label_key: str,
     task_mode: str,
     scope_key: str = "global",
+    strategy_id: str = "weather_temp_high",
     status: str = "training",
     model_dir: str | None = None,
     path=MODEL_REGISTRY_PATH,
@@ -80,6 +135,7 @@ def register_model(
     entry = {
         "model_id": model_id,
         "run_id": run_id,
+        "strategy_id": strategy_id,
         "label_key": label_key,
         "task_mode": task_mode,
         "scope_key": scope_key,
@@ -89,9 +145,11 @@ def register_model(
         "updated_at": _iso_now(),
         "paper_metrics": {},
         "paper_eval_count": 0,
+        "gate_results": {},
+        "data_health": {},
     }
     models.append(entry)
-    record_event(registry, "register_model", model_id=model_id, status=status)
+    record_event(registry, "register_model", model_id=model_id, strategy_id=strategy_id, status=status)
     save_registry(registry, path)
     return entry
 
@@ -104,13 +162,21 @@ def get_model(model_id: str, path=MODEL_REGISTRY_PATH) -> dict[str, Any] | None:
     return None
 
 
-def get_models_by_status(status: str, path=MODEL_REGISTRY_PATH) -> list[dict[str, Any]]:
+def get_models_by_status(
+    status: str,
+    *,
+    strategy_id: str | None = None,
+    path=MODEL_REGISTRY_PATH,
+) -> list[dict[str, Any]]:
     registry = load_registry(path)
-    return [
-        dict(m)
-        for m in registry.get("models", [])
-        if str(m.get("status")) == status
-    ]
+    out: list[dict[str, Any]] = []
+    for m in registry.get("models", []):
+        if str(m.get("status")) != status:
+            continue
+        if strategy_id and str(m.get("strategy_id")) != strategy_id:
+            continue
+        out.append(dict(m))
+    return out
 
 
 def update_status(
@@ -118,6 +184,8 @@ def update_status(
     new_status: str,
     reason: str = "",
     paper_metrics: dict[str, Any] | None = None,
+    gate_results: dict[str, Any] | None = None,
+    data_health: dict[str, Any] | None = None,
     path=MODEL_REGISTRY_PATH,
 ) -> dict[str, Any]:
     registry = load_registry(path)
@@ -132,10 +200,19 @@ def update_status(
             merged = dict(entry.get("paper_metrics") or {})
             merged.update(dict(paper_metrics))
             entry["paper_metrics"] = merged
+        if gate_results:
+            merged_gate = dict(entry.get("gate_results") or {})
+            merged_gate.update(dict(gate_results))
+            entry["gate_results"] = merged_gate
+        if data_health:
+            merged_health = dict(entry.get("data_health") or {})
+            merged_health.update(dict(data_health))
+            entry["data_health"] = merged_health
         record_event(
             registry,
             "update_status",
             model_id=model_id,
+            strategy_id=entry.get("strategy_id"),
             old_status=old_status,
             new_status=new_status,
             reason=reason,
@@ -206,6 +283,13 @@ def promote_champion(
         raise ValueError(f"model_id not found: {model_id}")
 
     registry.setdefault("champion_by_scope", {})[scope_key] = model_id
-    record_event(registry, "promote_champion", model_id=model_id, scope_key=scope_key, reason=reason)
+    record_event(
+        registry,
+        "promote_champion",
+        model_id=model_id,
+        strategy_id=(promoted or {}).get("strategy_id"),
+        scope_key=scope_key,
+        reason=reason,
+    )
     save_registry(registry, path)
     return promoted

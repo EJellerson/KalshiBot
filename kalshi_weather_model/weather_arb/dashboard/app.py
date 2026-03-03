@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -19,6 +20,13 @@ from weather_arb.analytics.monitoring import (
     operational_alerts_snapshot,
     recent_events_snapshot,
     train_gate_snapshot,
+    variant_operational_alerts_snapshot,
+)
+from weather_arb.governance.live_routing import live_routing_status
+from weather_arb.strategies.runtime import (
+    compute_portfolio_leaderboard,
+    strategies_summary_snapshot,
+    strategy_monitoring_snapshot,
 )
 from weather_arb.utils.io_utils import safe_read_json
 
@@ -151,6 +159,7 @@ def create_app() -> FastAPI:
         inventory = data_inventory_snapshot()
         events = recent_events_snapshot(limit=500)
         alerts = operational_alerts_snapshot(train_snapshot, inventory, events)
+        live_routing = live_routing_status()
 
         return {
             "ts_utc": _now_iso(),
@@ -171,7 +180,13 @@ def create_app() -> FastAPI:
                 "open_positions": len(live_state.get("open_positions", [])),
                 "closed_positions": len(live_state.get("closed_positions", [])),
                 "latest_metrics": live_latest,
-                "allow_live_trading": bool(config.ALLOW_LIVE_TRADING),
+                "allow_live_trading": bool(live_routing.get("enabled", False)),
+                "routing_reason": live_routing.get("reason"),
+                "routing_source": live_routing.get("source"),
+                "routing_champion": live_routing.get("champion_id"),
+                "manual_live_override": bool(live_routing.get("manual_enabled", False)),
+                "auto_live_enabled": bool(live_routing.get("auto_enabled", False)),
+                "auto_live_toggle_enabled": bool(live_routing.get("auto_toggle_enabled", False)),
                 "limits": dict(live_state.get("live_limits", {})),
             },
             "latest_signal": latest_signals[0] if latest_signals else None,
@@ -188,6 +203,11 @@ def create_app() -> FastAPI:
                 "status": alerts.get("status"),
                 "alert_counts": alerts.get("counts", {}),
                 "alerts_total": len(alerts.get("alerts", [])),
+            },
+            "strategies": strategies_summary_snapshot(),
+            "portfolio": {
+                "leaderboard": compute_portfolio_leaderboard(),
+                "champion": safe_read_json(config.CHAMPION_STATE_PATH) or {},
             },
         }
 
@@ -230,18 +250,104 @@ def create_app() -> FastAPI:
         train = train_gate_snapshot()
         inventory = data_inventory_snapshot()
         events = recent_events_snapshot(limit=500)
-        alerts = operational_alerts_snapshot(train, inventory, events)
+        global_alerts = operational_alerts_snapshot(train, inventory, events)
+        variant_alerts = variant_operational_alerts_snapshot()
+        live_routing = live_routing_status()
+
+        actionable_all = [
+            *(list(global_alerts.get("alerts") or [])),
+            *(list(variant_alerts.get("alerts") or [])),
+        ]
+        dedup_actionable: dict[str, dict[str, Any]] = {}
+        for row in actionable_all:
+            code = str((row or {}).get("code", "")).strip()
+            if code and code not in dedup_actionable:
+                dedup_actionable[code] = dict(row)
+        actionable_rows = list(dedup_actionable.values())
+
+        severity_order = {"info": 0, "warn": 1, "critical": 2}
+        actionable_status = "ok"
+        if actionable_rows:
+            worst = max(actionable_rows, key=lambda a: severity_order.get(str(a.get("severity", "warn")), 0))
+            actionable_status = str(worst.get("severity") or "warn")
+        actionable_counts = dict(Counter(str(a.get("severity", "warn")) for a in actionable_rows))
+
+        info_all = [
+            *(list(global_alerts.get("info") or [])),
+            *(list(variant_alerts.get("info") or [])),
+        ]
+        dedup_info: dict[str, dict[str, Any]] = {}
+        for row in info_all:
+            code = str((row or {}).get("code", "")).strip()
+            if code and code not in dedup_info:
+                dedup_info[code] = dict(row)
+        info_rows = list(dedup_info.values())
+
+        suppression_counter = Counter()
+        suppression_counter.update(dict((global_alerts.get("suppressed") or {}).get("by_reason") or {}))
+        suppression_counter.update(dict((variant_alerts.get("suppressed") or {}).get("by_reason") or {}))
+
         return {
             "ts_utc": _now_iso(),
             "train_gate": train,
             "inventory": inventory,
             "events": events,
-            "alerts": alerts,
+            "alerts": {
+                "status": actionable_status,
+                "alerts": actionable_rows,
+                "counts": actionable_counts,
+            },
+            # Backward-compatible alias.
+            "variant_alerts": variant_alerts,
+            "variant_alerts_actionable": variant_alerts,
+            "variant_alerts_info": {
+                "status": "info" if info_rows else "ok",
+                "alerts": info_rows,
+                "count": len(info_rows),
+            },
+            "alert_suppression": {
+                "count": int(sum(suppression_counter.values())),
+                "by_reason": dict(suppression_counter),
+                "global": dict(global_alerts.get("suppressed") or {}),
+                "variant": dict(variant_alerts.get("suppressed") or {}),
+            },
+            "info_alerts": {
+                "status": "info" if info_rows else "ok",
+                "alerts": info_rows,
+                "count": len(info_rows),
+            },
+            "strategies": strategies_summary_snapshot(),
             "runtime": {
                 "scheduler_interval_minutes": config.SCHEDULER_INTERVAL_MINUTES,
                 "obs_sync_interval_minutes": config.OBS_SYNC_INTERVAL_MINUTES,
-                "allow_live_trading": bool(config.ALLOW_LIVE_TRADING),
+                "allow_live_trading": bool(live_routing.get("enabled", False)),
+                "live_routing": live_routing,
             },
+        }
+
+    @app.get("/api/strategies/summary")
+    def strategies_summary() -> dict[str, Any]:
+        return strategies_summary_snapshot()
+
+    @app.get("/api/strategies/{strategy_id}/monitoring")
+    def strategy_monitoring(strategy_id: str) -> dict[str, Any]:
+        if strategy_id not in set(config.WEATHER_STRATEGY_IDS):
+            return {"error": "unknown strategy", "strategy_id": strategy_id}
+        return strategy_monitoring_snapshot(strategy_id)
+
+    @app.get("/api/portfolio/leaderboard")
+    def portfolio_leaderboard() -> dict[str, Any]:
+        return compute_portfolio_leaderboard()
+
+    @app.get("/api/portfolio/champion")
+    def portfolio_champion() -> dict[str, Any]:
+        leaderboard = compute_portfolio_leaderboard()
+        state = safe_read_json(config.CHAMPION_STATE_PATH) or {}
+        return {
+            "ts_utc": _now_iso(),
+            "champion": state,
+            "leaderboard_top": (leaderboard.get("rows") or [None])[0],
+            "challenger": leaderboard.get("challenger"),
         }
 
     @app.get("/api/charts")
@@ -291,6 +397,10 @@ def create_app() -> FastAPI:
                 "/api/contracts",
                 "/api/governance/events",
                 "/api/monitoring",
+                "/api/strategies/summary",
+                "/api/strategies/{id}/monitoring",
+                "/api/portfolio/leaderboard",
+                "/api/portfolio/champion",
                 "/api/charts",
                 "/api/ops/status",
                 "/api/ops/restart",
