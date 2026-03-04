@@ -664,16 +664,39 @@ def _variant_alerts(
         thresholds = dict(last_window.get("thresholds") or {})
         median_spread = last_window.get("median_spread")
         median_depth = last_window.get("median_depth")
-        spread_txt = "n/a" if median_spread is None else f"{float(median_spread):.3f}"
-        depth_txt = "n/a" if median_depth is None else f"{float(median_depth):.1f}"
+        snapshot_count = last_window.get("snapshot_count")
+        max_spread = thresholds.get("max_spread")
+        min_depth = thresholds.get("min_depth")
+        min_snapshots = thresholds.get("min_snapshots")
+
+        spread_eval = "n/a"
+        if median_spread is not None and max_spread is not None:
+            spread_fail = float(median_spread) > float(max_spread)
+            spread_eval = (
+                f"{float(median_spread):.3f} {'>' if spread_fail else '<='} {float(max_spread):.3f} "
+                f"({'fail' if spread_fail else 'pass'})"
+            )
+        depth_eval = "n/a"
+        if median_depth is not None and min_depth is not None:
+            depth_fail = float(median_depth) < float(min_depth)
+            depth_eval = (
+                f"{float(median_depth):.1f} {'<' if depth_fail else '>='} {float(min_depth):.1f} "
+                f"({'fail' if depth_fail else 'pass'})"
+            )
+        snapshots_eval = "n/a"
+        if snapshot_count is not None and min_snapshots is not None:
+            snapshots_fail = int(snapshot_count) < int(min_snapshots)
+            snapshots_eval = (
+                f"{int(snapshot_count)} {'<' if snapshots_fail else '>='} {int(min_snapshots)} "
+                f"({'fail' if snapshots_fail else 'pass'})"
+            )
         alerts.append(
             {
                 "severity": "warn",
                 "code": f"liquidity_blocked_{strategy_id}",
                 "message": (
                     "Liquidity gate blocked entries "
-                    f"(median_spread={spread_txt} > {thresholds.get('max_spread')}, "
-                    f"median_depth={depth_txt} < {thresholds.get('min_depth')})."
+                    f"(spread={spread_eval}, depth={depth_eval}, snapshots={snapshots_eval})."
                 ),
             }
         )
