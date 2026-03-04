@@ -738,11 +738,17 @@ def _variant_alerts(
         )
 
     if not benchmark_available and is_tradable_strategy(strategy_id):
+        severity = "critical" if bool(train_gate_pass) else "warn"
+        message = (
+            "Benchmark unavailable; variant is fail-closed."
+            if severity == "critical"
+            else "Benchmark unavailable during train warmup; entries remain blocked."
+        )
         alerts.append(
             {
-                "severity": "critical",
+                "severity": severity,
                 "code": f"stale_benchmark_{strategy_id}",
-                "message": "Benchmark unavailable; variant is fail-closed.",
+                "message": message,
             }
         )
 
@@ -1461,6 +1467,12 @@ def strategies_summary_snapshot() -> dict[str, Any]:
     for strategy_id in config.WEATHER_STRATEGY_IDS:
         cycle = safe_read_json(config.strategy_runtime_cycle_path(strategy_id)) or {}
         gates = safe_read_json(config.strategy_runtime_gates_path(strategy_id)) or {}
+        benchmark = dict(cycle.get("benchmark") or {})
+        freshness = dict(cycle.get("freshness") or {})
+        stale = dict(freshness.get("stale") or {})
+        benchmark_stream_fresh = not bool(stale.get("benchmark", True))
+        benchmark_available = bool(benchmark.get("available", False))
+        benchmark_fresh = bool(benchmark_available and benchmark_stream_fresh)
 
         stage = "calibrating"
         if _strategy_mode(strategy_id) == "discovery_only":
@@ -1477,7 +1489,8 @@ def strategies_summary_snapshot() -> dict[str, Any]:
                 "stage": stage,
                 "entry_allowed": bool((cycle.get("entry_gate") or {}).get("allowed", False)),
                 "blocked_reasons": list((cycle.get("entry_gate") or {}).get("blocked_reasons", [])),
-                "benchmark_fresh": not bool(((cycle.get("freshness") or {}).get("stale") or {}).get("benchmark", True)),
+                "benchmark_fresh": benchmark_fresh,
+                "benchmark_available": benchmark_available,
                 "latest_cycle_ts_utc": cycle.get("ts_utc"),
                 "alerts": list(cycle.get("alerts") or []),
             }
