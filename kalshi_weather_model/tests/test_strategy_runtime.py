@@ -322,6 +322,32 @@ def test_portfolio_leaderboard_is_deterministic(monkeypatch, tmp_path):
     assert first_rows[0][0] == "weather_temp_high"
 
 
+def test_portfolio_leaderboard_does_not_promote_discovery_only_over_tradable(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+
+    safe_write_json_atomic(
+        config.strategy_paper_metrics_daily_path("weather_temp_high"),
+        {"by_day": {"2026-03-01": {"trades": 2, "wins": 1, "pnl_dollars": -1.0, "roi_per_trade": -0.01}}},
+    )
+    safe_write_json_atomic(
+        config.strategy_paper_metrics_daily_path("weather_temp_low"),
+        {"by_day": {"2026-03-01": {"trades": 2, "wins": 0, "pnl_dollars": -2.0, "roi_per_trade": -0.02}}},
+    )
+    safe_write_json_atomic(
+        config.strategy_paper_metrics_daily_path("weather_temp_bucket"),
+        {"by_day": {"2026-03-01": {"trades": 2, "wins": 0, "pnl_dollars": -3.0, "roi_per_trade": -0.03}}},
+    )
+
+    board = runtime.compute_portfolio_leaderboard(datetime(2026, 3, 3, tzinfo=timezone.utc))
+    rows = list(board.get("rows", []))
+    assert rows
+    assert str(rows[0].get("mode")) == "tradable"
+
+    for row in rows:
+        if str(row.get("mode")) != "tradable":
+            assert float(row.get("score", 0.0) or 0.0) == 0.0
+
+
 def test_leaderboard_uses_cycle_data_health_freshness(monkeypatch, tmp_path):
     _patch_config_paths(monkeypatch, tmp_path)
     strategy_id = "weather_temp_high"
@@ -368,3 +394,27 @@ def test_leaderboard_uses_cycle_data_health_freshness(monkeypatch, tmp_path):
     assert row["data_health_green"] is False
     assert row["data_health_source"] == "cycle_entry_checks"
     assert row["data_health_source_ts_utc"] == "2026-03-03T12:15:00+00:00"
+
+
+def test_variant_alerts_include_liquidity_block_details():
+    alerts = runtime._variant_alerts(
+        strategy_id="weather_temp_high",
+        contract_quality={
+            "parse_rate": 1.0,
+            "parse_alert_sample_count": 30,
+            "eligible_count": 5,
+        },
+        freshness={"stale": {"quotes": False, "signals": False, "benchmark": False}},
+        liquidity={
+            "qualified": False,
+            "last_window": {
+                "median_spread": 0.62,
+                "median_depth": 3.0,
+                "thresholds": {"max_spread": 0.15, "min_depth": 10},
+            },
+        },
+        benchmark_available=True,
+    )
+
+    codes = {str(a.get("code")) for a in alerts}
+    assert "liquidity_blocked_weather_temp_high" in codes

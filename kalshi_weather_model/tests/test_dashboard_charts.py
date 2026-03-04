@@ -19,6 +19,7 @@ def _patch_dashboard_paths(monkeypatch, tmp_path: Path) -> None:
     paper_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(config, "STRATEGIES_DIR", strategies_dir)
     monkeypatch.setattr(config, "PAPER_SLEEVES_PATH", paper_dir / "paper_sleeves.json")
+    monkeypatch.setattr(config, "PAPER_METRICS_DAILY_PATH", paper_dir / "paper_metrics_daily.json")
 
     for strategy_id in config.WEATHER_STRATEGY_IDS:
         config.strategy_paper_dir(strategy_id).mkdir(parents=True, exist_ok=True)
@@ -26,8 +27,9 @@ def _patch_dashboard_paths(monkeypatch, tmp_path: Path) -> None:
         config.strategy_quotes_dir(strategy_id).mkdir(parents=True, exist_ok=True)
 
 
-def test_chart_data_aggregates_per_strategy_metrics(monkeypatch, tmp_path):
+def test_chart_data_uses_governance_paper_metrics(monkeypatch, tmp_path):
     _patch_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "PAPER_ACCOUNT_SIZE", 300.0)
 
     safe_write_json_atomic(
         config.PAPER_SLEEVES_PATH,
@@ -37,16 +39,8 @@ def test_chart_data_aggregates_per_strategy_metrics(monkeypatch, tmp_path):
         },
     )
     safe_write_json_atomic(
-        config.strategy_paper_metrics_daily_path("weather_temp_high"),
-        {"by_day": {"2026-03-01": {"pnl_dollars": 1.0}, "2026-03-02": {"pnl_dollars": -0.5}}},
-    )
-    safe_write_json_atomic(
-        config.strategy_paper_metrics_daily_path("weather_temp_low"),
-        {"by_day": {"2026-03-01": {"pnl_dollars": 2.0}}},
-    )
-    safe_write_json_atomic(
-        config.strategy_paper_metrics_daily_path("weather_temp_bucket"),
-        {"by_day": {}},
+        config.PAPER_METRICS_DAILY_PATH,
+        {"by_day": {"2026-03-01": {"pnl_dollars": 3.0}, "2026-03-02": {"pnl_dollars": -0.5}}},
     )
 
     pd.DataFrame([{"ticker": "A"}, {"ticker": "B"}]).to_parquet(
@@ -72,6 +66,8 @@ def test_chart_data_aggregates_per_strategy_metrics(monkeypatch, tmp_path):
         {"date": "2026-03-02", "pnl": -0.5},
     ]
     assert signal_count == [{"date": "2026-03-01", "count": 5}]
+    assert out["source"] == "governance_paper_account"
+    assert out["data_as_of"] == "2026-03-02"
 
 
 def test_latest_signal_and_quote_rows_read_strategy_dirs(monkeypatch, tmp_path):

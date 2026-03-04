@@ -608,6 +608,7 @@ def _variant_alerts(
     strategy_id: str,
     contract_quality: dict[str, Any],
     freshness: dict[str, Any],
+    liquidity: dict[str, Any],
     benchmark_available: bool,
 ) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
@@ -657,6 +658,25 @@ def _variant_alerts(
         alerts.append({"severity": "warn", "code": f"stale_signals_{strategy_id}", "message": "Signals stream is stale."})
     if stale.get("benchmark"):
         alerts.append({"severity": "warn", "code": f"stale_benchmark_{strategy_id}", "message": "Benchmark stream is stale."})
+
+    if is_tradable_strategy(strategy_id) and not bool(liquidity.get("qualified", False)):
+        last_window = dict(liquidity.get("last_window") or {})
+        thresholds = dict(last_window.get("thresholds") or {})
+        median_spread = last_window.get("median_spread")
+        median_depth = last_window.get("median_depth")
+        spread_txt = "n/a" if median_spread is None else f"{float(median_spread):.3f}"
+        depth_txt = "n/a" if median_depth is None else f"{float(median_depth):.1f}"
+        alerts.append(
+            {
+                "severity": "warn",
+                "code": f"liquidity_blocked_{strategy_id}",
+                "message": (
+                    "Liquidity gate blocked entries "
+                    f"(median_spread={spread_txt} > {thresholds.get('max_spread')}, "
+                    f"median_depth={depth_txt} < {thresholds.get('min_depth')})."
+                ),
+            }
+        )
 
     if not benchmark_available and is_tradable_strategy(strategy_id):
         alerts.append(
@@ -913,6 +933,7 @@ def run_strategy_cycle(
         strategy_id=strategy_id,
         contract_quality=contract_quality,
         freshness=freshness,
+        liquidity=liquidity,
         benchmark_available=benchmark_available,
     )
 
@@ -1214,23 +1235,36 @@ def _leaderboard_row(strategy_id: str) -> dict[str, Any]:
 def compute_portfolio_leaderboard(now_utc: datetime | None = None) -> dict[str, Any]:
     now = now_utc or _utc_now()
     rows = [_leaderboard_row(sid) for sid in config.WEATHER_STRATEGY_IDS]
-
-    ev_norm = _normalize([float(r["ev_day"]) for r in rows])
-    dd_norm = _normalize([float(r["drawdown"]) for r in rows])
-    consistency_norm = _normalize([float(r["consistency"]) for r in rows])
-    health_norm = _normalize([float(r["data_health"]) for r in rows])
-
     weights = dict(config.PORTFOLIO_SCORE_WEIGHTS)
-    for i, row in enumerate(rows):
-        score = (
-            float(weights.get("ev_day", 0.4)) * ev_norm[i]
-            + float(weights.get("drawdown", 0.3)) * dd_norm[i]
-            + float(weights.get("consistency", 0.2)) * consistency_norm[i]
-            + float(weights.get("data_health", 0.1)) * health_norm[i]
-        ) * 100.0
-        row["score"] = round(score, 4)
+    tradable_indices = [i for i, row in enumerate(rows) if str(row.get("mode")) == "tradable"]
 
-    rows.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+    if tradable_indices:
+        tradable_rows = [rows[i] for i in tradable_indices]
+        ev_norm = _normalize([float(r["ev_day"]) for r in tradable_rows])
+        dd_norm = _normalize([float(r["drawdown"]) for r in tradable_rows])
+        consistency_norm = _normalize([float(r["consistency"]) for r in tradable_rows])
+        health_norm = _normalize([float(r["data_health"]) for r in tradable_rows])
+
+        for norm_idx, row_idx in enumerate(tradable_indices):
+            score = (
+                float(weights.get("ev_day", 0.4)) * ev_norm[norm_idx]
+                + float(weights.get("drawdown", 0.3)) * dd_norm[norm_idx]
+                + float(weights.get("consistency", 0.2)) * consistency_norm[norm_idx]
+                + float(weights.get("data_health", 0.1)) * health_norm[norm_idx]
+            ) * 100.0
+            rows[row_idx]["score"] = round(score, 4)
+
+    for row in rows:
+        if "score" not in row:
+            row["score"] = 0.0
+
+    rows.sort(
+        key=lambda x: (
+            float(x.get("score", 0.0)),
+            1 if str(x.get("mode")) == "tradable" else 0,
+        ),
+        reverse=True,
+    )
     for idx, row in enumerate(rows, start=1):
         row["rank"] = idx
 

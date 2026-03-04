@@ -44,18 +44,13 @@ def _parquet_row_count(path: Path) -> int:
 
 def _chart_data() -> dict[str, Any]:
     """Build all three chart series for the Overview tab."""
-    by_day_totals: dict[str, float] = {}
-    for strategy_id in config.TRADABLE_WEATHER_STRATEGIES:
-        payload = safe_read_json(config.strategy_paper_metrics_daily_path(strategy_id)) or {}
-        by_day: dict[str, Any] = dict(payload.get("by_day", {}))
-        for day_key, metrics in by_day.items():
-            pnl = float((metrics or {}).get("pnl_dollars", 0.0) or 0.0)
-            by_day_totals[day_key] = float(by_day_totals.get(day_key, 0.0) + pnl)
-
-    sleeves = safe_read_json(config.PAPER_SLEEVES_PATH) or {}
-    default_initial = float(config.PAPER_ACCOUNT_SIZE) / max(len(config.WEATHER_STRATEGY_IDS), 1)
-    initial_sleeve = float(sleeves.get("initial_sleeve_equity", default_initial) or default_initial)
-    starting_equity = initial_sleeve * float(len(config.TRADABLE_WEATHER_STRATEGIES))
+    payload = safe_read_json(config.PAPER_METRICS_DAILY_PATH) or {}
+    by_day_payload: dict[str, Any] = dict(payload.get("by_day", {}))
+    by_day_totals = {
+        day_key: float((metrics or {}).get("pnl_dollars", 0.0) or 0.0)
+        for day_key, metrics in by_day_payload.items()
+    }
+    starting_equity = float(config.PAPER_ACCOUNT_SIZE)
 
     equity_series: list[dict[str, Any]] = []
     pnl_series: list[dict[str, Any]] = []
@@ -74,11 +69,14 @@ def _chart_data() -> dict[str, Any]:
             date_part = path.stem.replace("signals_", "", 1)
             signal_counts[date_part] = int(signal_counts.get(date_part, 0) + _parquet_row_count(path))
     signal_series = [{"date": day, "count": signal_counts[day]} for day in sorted(signal_counts.keys())]
+    data_as_of = sorted(by_day_totals.keys())[-1] if by_day_totals else None
 
     return {
         "equity_curve": equity_series,
         "daily_pnl": pnl_series,
         "signal_count": signal_series,
+        "source": "governance_paper_account",
+        "data_as_of": data_as_of,
     }
 
 

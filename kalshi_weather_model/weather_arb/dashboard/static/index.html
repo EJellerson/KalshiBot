@@ -1054,6 +1054,8 @@
             }],
           };
         }, [chartData]);
+        const chartSource = chartData?.source || "unknown";
+        const chartAsOf = chartData?.data_as_of || "-";
 
         /* Loading state */
         if (!summary || !monitor) {
@@ -1299,16 +1301,19 @@
                 </div>
 
                 {/* ── Charts ────────────────────────────────── */}
+                <div className="sub" style={{ marginBottom: "8px" }}>
+                  paper chart source: {chartSource} | data as of: {chartAsOf}
+                </div>
                 <div className="chart-grid">
                   <ChartCard
-                    title="Paper Equity Curve"
+                    title="Governance Paper Equity Curve"
                     type="line"
                     data={equityChartData}
                     options={equityCurveOptions()}
                     emptyText="Waiting for first trade..."
                   />
                   <ChartCard
-                    title="Daily P&L"
+                    title="Governance Daily P&L"
                     type="bar"
                     data={pnlChartData}
                     options={dailyPnlOptions()}
