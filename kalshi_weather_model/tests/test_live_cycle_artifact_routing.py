@@ -67,9 +67,9 @@ def test_cmd_live_cycle_invalid_champion_fails_closed(monkeypatch, tmp_path, cap
     assert called["run_live_cycle"] is False
 
 
-def test_cmd_live_cycle_rejects_stale_strategy_live_input(monkeypatch, tmp_path, capsys):
+def test_cmd_live_cycle_stale_strategy_live_input_blocks_entries_but_runs_cycle(monkeypatch, tmp_path, capsys):
     _patch_live_cycle_paths(monkeypatch, tmp_path)
-    called = {"run_live_cycle": False}
+    captured: dict[str, object] = {}
     champion_id = "weather_temp_high"
     now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
 
@@ -102,17 +102,99 @@ def test_cmd_live_cycle_rejects_stale_strategy_live_input(monkeypatch, tmp_path,
         },
     )
 
-    def _never_called(*_args, **_kwargs):
-        called["run_live_cycle"] = True
-        return {}
+    def _capture_run_live_cycle(sig, qmap, *_args, **kwargs):
+        captured["signals"] = sig
+        captured["quote_map"] = qmap
+        captured["allow_new_entries"] = kwargs.get("allow_new_entries")
+        return {"opened": 0, "closed": 0, "alerts": []}
 
-    monkeypatch.setattr(main, "run_live_cycle", _never_called)
+    monkeypatch.setattr(main, "run_live_cycle", _capture_run_live_cycle)
     main.cmd_live_cycle(argparse.Namespace())
 
     out = json.loads(capsys.readouterr().out)
-    assert out["skipped"] is True
-    assert out["reason"] == "strategy_live_input_stale"
-    assert called["run_live_cycle"] is False
+    assert out["entry_blocked"] is True
+    assert "strategy_live_input_stale" in out["entry_block_reasons"]
+    assert captured["signals"] == []
+    assert captured["quote_map"] == {}
+    assert captured["allow_new_entries"] is False
+
+
+def test_cmd_live_cycle_entry_gate_blocked_runs_exits_only(monkeypatch, tmp_path, capsys):
+    _patch_live_cycle_paths(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+    champion_id = "weather_temp_high"
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    signals = [
+        {
+            "strategy_id": champion_id,
+            "ticker": "KXHIGHNYC-26MAR03-T75",
+            "city": "NYC",
+            "side": "buy_yes",
+            "ev_cents": 12.0,
+            "min_ev_cents": 6.0,
+            "settlement_ts_utc": (now + timedelta(hours=10)).isoformat(),
+        }
+    ]
+    quote_map = {
+        "KXHIGHNYC-26MAR03-T75": {
+            "ticker": "KXHIGHNYC-26MAR03-T75",
+            "ts_utc": now.isoformat(),
+            "yes_bid_dollars": 0.45,
+            "yes_ask_dollars": 0.46,
+            "no_bid_dollars": 0.54,
+            "no_ask_dollars": 0.55,
+            "yes_bid_size": 25,
+            "yes_ask_size": 25,
+            "no_bid_size": 25,
+            "no_ask_size": 25,
+        }
+    }
+
+    monkeypatch.setattr(main, "_utc_now", lambda: now)
+    monkeypatch.setattr(
+        main,
+        "live_routing_status",
+        lambda: {
+            "enabled": False,
+            "reason": "no_champion_available",
+            "champion_id": champion_id,
+            "manual_enabled": False,
+            "auto_enabled": False,
+            "auto_toggle_enabled": True,
+            "source": "strategy_champion_state",
+        },
+    )
+    monkeypatch.setattr(main, "_latest_model_for_status", lambda _status: None)
+    monkeypatch.setattr(main, "append_quote_rows", lambda _rows, _now: None)
+    monkeypatch.setattr(main, "append_signal_rows", lambda _rows, _now: None)
+    safe_write_json_atomic(
+        config.strategy_live_input_path(champion_id),
+        {
+            "strategy_id": champion_id,
+            "ts_utc": now.isoformat(),
+            "signals": signals,
+            "quote_map": quote_map,
+            "entry_allowed": False,
+            "blocked_reasons": ["train_gate"],
+        },
+    )
+
+    def _capture_run_live_cycle(sig, qmap, *_args, **kwargs):
+        captured["signals"] = sig
+        captured["quote_map"] = qmap
+        captured["allow_new_entries"] = kwargs.get("allow_new_entries")
+        return {"opened": 0, "closed": 0, "alerts": []}
+
+    monkeypatch.setattr(main, "run_live_cycle", _capture_run_live_cycle)
+    main.cmd_live_cycle(argparse.Namespace())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["entry_blocked"] is True
+    assert "strategy_entry_gate_blocked" in out["entry_block_reasons"]
+    assert out["blocked_reasons"] == ["train_gate"]
+    assert captured["signals"] == []
+    assert captured["quote_map"] == quote_map
+    assert captured["allow_new_entries"] is False
 
 
 def test_cmd_live_cycle_routes_champion_artifact_signals(monkeypatch, tmp_path, capsys):
