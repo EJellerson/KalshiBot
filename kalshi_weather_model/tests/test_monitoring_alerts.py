@@ -66,6 +66,8 @@ def test_variant_alerts_route_discovery_only_to_info(monkeypatch) -> None:
                 {
                     "strategy_id": "weather_temp_high",
                     "mode": "tradable",
+                    "train_gate_pass": True,
+                    "benchmark_available": True,
                     "alerts": [
                         {
                             "severity": "warn",
@@ -79,6 +81,8 @@ def test_variant_alerts_route_discovery_only_to_info(monkeypatch) -> None:
                 {
                     "strategy_id": "weather_precip",
                     "mode": "discovery_only",
+                    "train_gate_pass": False,
+                    "benchmark_available": False,
                     "alerts": [
                         {
                             "severity": "warn",
@@ -125,6 +129,8 @@ def test_variant_parse_warmup_routed_to_info_for_tradable(monkeypatch) -> None:
                 {
                     "strategy_id": "weather_temp_high",
                     "mode": "tradable",
+                    "train_gate_pass": True,
+                    "benchmark_available": True,
                     "alerts": [],
                     "contract_quality": {
                         "parse_rate": 0.4,
@@ -147,6 +153,109 @@ def test_variant_parse_warmup_routed_to_info_for_tradable(monkeypatch) -> None:
     assert "contract_parse_degraded_weather_temp_high" not in actionable_codes
     assert "contract_parse_degraded_weather_temp_high" in info_codes
     assert int((out.get("suppressed") or {}).get("by_reason", {}).get("warmup_parse_sample", 0)) >= 1
+
+
+def test_variant_warmup_train_blockers_routed_to_info(monkeypatch) -> None:
+    def fake_strategies_health_snapshot() -> dict:
+        return {
+            "ts_utc": "2026-03-04T00:00:00+00:00",
+            "rows": [
+                {
+                    "strategy_id": "weather_temp_high",
+                    "mode": "tradable",
+                    "train_gate_pass": False,
+                    "benchmark_available": False,
+                    "alerts": [
+                        {
+                            "severity": "warn",
+                            "code": "train_gate_blocked_weather_temp_high",
+                            "message": "Train gate blocked entries.",
+                        },
+                        {
+                            "severity": "warn",
+                            "code": "liquidity_blocked_weather_temp_high",
+                            "message": "Liquidity gate blocked entries.",
+                        },
+                        {
+                            "severity": "warn",
+                            "code": "stale_benchmark_weather_temp_high",
+                            "message": "Benchmark unavailable during train warmup; entries remain blocked.",
+                        },
+                        {
+                            "severity": "warn",
+                            "code": "stale_quotes_weather_temp_high",
+                            "message": "Quotes stream is stale.",
+                        },
+                    ],
+                    "contract_quality": {
+                        "parse_rate": 1.0,
+                        "raw_count": 100,
+                        "parse_alert_sample_count": 100,
+                        "eligible_count": 0,
+                    },
+                    "freshness": {},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(monitoring, "strategies_health_snapshot", fake_strategies_health_snapshot)
+
+    out = monitoring.variant_operational_alerts_snapshot()
+    actionable_codes = {row["code"] for row in out["alerts"]}
+    info_codes = {row["code"] for row in out.get("info", [])}
+
+    assert "stale_quotes_weather_temp_high" in actionable_codes
+
+    assert "train_gate_blocked_weather_temp_high" not in actionable_codes
+    assert "liquidity_blocked_weather_temp_high" not in actionable_codes
+    assert "contract_eligible_low_weather_temp_high" not in actionable_codes
+    assert "stale_benchmark_weather_temp_high" not in actionable_codes
+
+    assert "train_gate_blocked_weather_temp_high" in info_codes
+    assert "liquidity_blocked_weather_temp_high" in info_codes
+    assert "contract_eligible_low_weather_temp_high" in info_codes
+    assert "stale_benchmark_weather_temp_high" in info_codes
+
+    assert int((out.get("suppressed") or {}).get("by_reason", {}).get("warmup_train_blockers", 0)) >= 4
+
+
+def test_variant_stale_benchmark_data_remains_actionable_pre_train(monkeypatch) -> None:
+    def fake_strategies_health_snapshot() -> dict:
+        return {
+            "ts_utc": "2026-03-04T00:00:00+00:00",
+            "rows": [
+                {
+                    "strategy_id": "weather_temp_high",
+                    "mode": "tradable",
+                    "train_gate_pass": False,
+                    "benchmark_available": True,
+                    "alerts": [
+                        {
+                            "severity": "warn",
+                            "code": "stale_benchmark_weather_temp_high",
+                            "message": "Benchmark data is stale (last successful benchmark update exceeded threshold).",
+                        }
+                    ],
+                    "contract_quality": {
+                        "parse_rate": 1.0,
+                        "raw_count": 100,
+                        "parse_alert_sample_count": 100,
+                        "eligible_count": 12,
+                    },
+                    "freshness": {},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(monitoring, "strategies_health_snapshot", fake_strategies_health_snapshot)
+
+    out = monitoring.variant_operational_alerts_snapshot()
+    actionable_codes = {row["code"] for row in out["alerts"]}
+    info_codes = {row["code"] for row in out.get("info", [])}
+
+    assert "stale_benchmark_weather_temp_high" in actionable_codes
+    assert "stale_benchmark_weather_temp_high" not in info_codes
+    assert int((out.get("suppressed") or {}).get("by_reason", {}).get("warmup_train_blockers", 0)) == 0
 
 
 def _patch_monitoring_paths(monkeypatch, tmp_path: Path) -> None:

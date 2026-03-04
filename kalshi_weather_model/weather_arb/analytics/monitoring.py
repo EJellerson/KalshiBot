@@ -488,14 +488,28 @@ def strategies_health_snapshot() -> dict[str, Any]:
     for strategy_id in config.WEATHER_STRATEGY_IDS:
         try:
             snap = strategy_monitoring_snapshot(strategy_id)
+            cycle = dict(snap.get("cycle") or {})
+            mode = str((config.WEATHER_STRATEGY_METADATA.get(strategy_id) or {}).get("mode", "discovery_only"))
+            train_gate = dict(cycle.get("train_gate") or {})
+            train_gate_pass_raw = train_gate.get("pass")
+            if train_gate_pass_raw is None:
+                train_gate_pass = False if mode == "tradable" else True
+            else:
+                train_gate_pass = bool(train_gate_pass_raw)
+
+            entry_gate = dict(cycle.get("entry_gate") or {})
+            benchmark = dict(cycle.get("benchmark") or snap.get("benchmark") or {})
             rows.append(
                 {
                     "strategy_id": strategy_id,
-                    "mode": str((config.WEATHER_STRATEGY_METADATA.get(strategy_id) or {}).get("mode", "discovery_only")),
-                    "entry_allowed": bool(((snap.get("cycle") or {}).get("entry_gate") or {}).get("allowed", False)),
-                    "alerts": list((snap.get("cycle") or {}).get("alerts") or []),
-                    "contract_quality": dict((snap.get("cycle") or {}).get("contract_quality") or {}),
-                    "freshness": dict((snap.get("cycle") or {}).get("freshness") or {}),
+                    "mode": mode,
+                    "train_gate_pass": train_gate_pass,
+                    "entry_allowed": bool(entry_gate.get("allowed", False)),
+                    "blocked_reasons": list(entry_gate.get("blocked_reasons") or []),
+                    "benchmark_available": bool(benchmark.get("available", False)),
+                    "alerts": list(cycle.get("alerts") or []),
+                    "contract_quality": dict(cycle.get("contract_quality") or {}),
+                    "freshness": dict(cycle.get("freshness") or {}),
                 }
             )
         except Exception as exc:
@@ -518,6 +532,8 @@ def variant_operational_alerts_snapshot() -> dict[str, Any]:
             continue
 
         mode = str(row.get("mode", "discovery_only"))
+        train_gate_pass = bool(row.get("train_gate_pass", False))
+        benchmark_available = bool(row.get("benchmark_available", False))
         row_alerts: list[dict[str, Any]] = []
 
         for alert in list(row.get("alerts") or []):
@@ -574,6 +590,22 @@ def variant_operational_alerts_snapshot() -> dict[str, Any]:
         if is_actionable_strategy:
             for alert in row_alerts:
                 sev = str(alert.get("severity", "warn"))
+                code = str(alert.get("code", ""))
+                warmup_train_blocker = (
+                    code.startswith(f"train_gate_blocked_{strategy_id}")
+                    or code.startswith(f"contract_eligible_low_{strategy_id}")
+                    or code.startswith(f"liquidity_blocked_{strategy_id}")
+                    or (code.startswith(f"stale_benchmark_{strategy_id}") and not benchmark_available)
+                )
+
+                if (not train_gate_pass) and warmup_train_blocker:
+                    info = dict(alert)
+                    info["severity"] = "info"
+                    info["routed_severity"] = sev
+                    info_alerts.append(info)
+                    suppressed["warmup_train_blockers"] += 1
+                    continue
+
                 if sev == "info":
                     info_alerts.append(dict(alert))
                     suppressed["warmup_parse_sample"] += 1
