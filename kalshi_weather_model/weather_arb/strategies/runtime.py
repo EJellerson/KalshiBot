@@ -360,25 +360,33 @@ def _compute_freshness(strategy_id: str, now_utc: datetime) -> dict[str, Any]:
     quotes_ts = _latest_parquet_mtime_iso(config.strategy_quotes_dir(strategy_id), "quotes")
     signals_ts = _latest_parquet_mtime_iso(config.strategy_signals_dir(strategy_id), "signals")
     benchmark = safe_read_json(config.strategy_benchmark_latest_path(strategy_id)) or {}
-    benchmark_ts = benchmark.get("updated_at")
+    benchmark_attempt_ts = benchmark.get("last_attempted_at_utc") or benchmark.get("updated_at")
+    benchmark_success_ts = benchmark.get("last_successful_updated_at_utc")
+    if benchmark_success_ts is None and bool(benchmark.get("available", False)):
+        # Backward-compatible fallback for legacy benchmark artifacts.
+        benchmark_success_ts = benchmark.get("updated_at")
 
     thresholds = {
         "contracts": float(max(config.MARKET_DISCOVERY_MINUTES * config.STRATEGY_STALE_MULTIPLIER, 45.0)),
         "quotes": float(max(config.SCHEDULER_INTERVAL_MINUTES * config.STRATEGY_STALE_MULTIPLIER, 45.0)),
         "signals": float(max(config.SCHEDULER_INTERVAL_MINUTES * config.STRATEGY_STALE_MULTIPLIER, 45.0)),
         "benchmark": float(config.STRATEGY_BENCHMARK_MAX_AGE_MINUTES.get(strategy_id, 180.0)),
+        "benchmark_attempt": float(config.STRATEGY_BENCHMARK_MAX_AGE_MINUTES.get(strategy_id, 180.0)),
     }
 
     ages = {
         "contracts": _minutes_since(contracts_ts, now_utc),
         "quotes": _minutes_since(quotes_ts, now_utc),
         "signals": _minutes_since(signals_ts, now_utc),
-        "benchmark": _minutes_since(benchmark_ts, now_utc),
+        # Benchmark data freshness tracks the latest successful benchmark update.
+        "benchmark": _minutes_since(benchmark_success_ts, now_utc),
+        # Benchmark stream freshness tracks recent benchmark fetch attempts.
+        "benchmark_attempt": _minutes_since(benchmark_attempt_ts, now_utc),
     }
 
     stale = {
         name: (ages[name] is None or float(ages[name]) > float(thresholds[name]))
-        for name in ["contracts", "quotes", "signals", "benchmark"]
+        for name in ["contracts", "quotes", "signals", "benchmark", "benchmark_attempt"]
     }
 
     return {
@@ -677,8 +685,14 @@ def _variant_alerts(
         alerts.append({"severity": "warn", "code": f"stale_quotes_{strategy_id}", "message": "Quotes stream is stale."})
     if stale.get("signals"):
         alerts.append({"severity": "warn", "code": f"stale_signals_{strategy_id}", "message": "Signals stream is stale."})
-    if stale.get("benchmark"):
-        alerts.append({"severity": "warn", "code": f"stale_benchmark_{strategy_id}", "message": "Benchmark stream is stale."})
+    if stale.get("benchmark") and bool(benchmark_available):
+        alerts.append(
+            {
+                "severity": "warn",
+                "code": f"stale_benchmark_{strategy_id}",
+                "message": "Benchmark data is stale (last successful benchmark update exceeded threshold).",
+            }
+        )
 
     if is_tradable_strategy(strategy_id) and not bool(train_gate_pass):
         reasons = [str(r) for r in (train_gate_reasons or []) if str(r).strip()]
@@ -858,6 +872,12 @@ def run_strategy_cycle(
 
     benchmark: dict[str, Any]
     benchmark_available = False
+    benchmark_path = config.strategy_benchmark_latest_path(strategy_id)
+    benchmark_prev = safe_read_json(benchmark_path) or {}
+    benchmark_attempt_ts = now.isoformat(timespec="seconds")
+    benchmark_success_ts = benchmark_prev.get("last_successful_updated_at_utc")
+    if benchmark_success_ts is None and bool(benchmark_prev.get("available", False)):
+        benchmark_success_ts = benchmark_prev.get("updated_at")
     ctx = context
     if strategy_id.startswith("weather_temp"):
         try:
@@ -865,7 +885,9 @@ def run_strategy_cycle(
                 ctx = build_strategy_context(now, noaa=noaa_client)
             benchmark = {
                 "strategy_id": strategy_id,
-                "updated_at": now.isoformat(timespec="seconds"),
+                "updated_at": benchmark_attempt_ts,
+                "last_attempted_at_utc": benchmark_attempt_ts,
+                "last_successful_updated_at_utc": benchmark_attempt_ts,
                 "available": True,
                 "source": "noaa_hourly",
                 "cities": sorted(list(ctx.forecast_extremes.keys())),
@@ -874,19 +896,23 @@ def run_strategy_cycle(
         except Exception as exc:
             benchmark = {
                 "strategy_id": strategy_id,
-                "updated_at": now.isoformat(timespec="seconds"),
+                "updated_at": benchmark_attempt_ts,
+                "last_attempted_at_utc": benchmark_attempt_ts,
+                "last_successful_updated_at_utc": benchmark_success_ts,
                 "available": False,
                 "reason": f"benchmark_fetch_failed: {exc}",
             }
     else:
         benchmark = {
             "strategy_id": strategy_id,
-            "updated_at": now.isoformat(timespec="seconds"),
+            "updated_at": benchmark_attempt_ts,
+            "last_attempted_at_utc": benchmark_attempt_ts,
+            "last_successful_updated_at_utc": benchmark_success_ts,
             "available": False,
             "reason": "benchmark_adapter_missing",
         }
 
-    safe_write_json_atomic(config.strategy_benchmark_latest_path(strategy_id), benchmark)
+    safe_write_json_atomic(benchmark_path, benchmark)
 
     signals: list[dict[str, Any]] = []
     signal_skipped: list[dict[str, Any]] = []
@@ -1470,9 +1496,10 @@ def strategies_summary_snapshot() -> dict[str, Any]:
         benchmark = dict(cycle.get("benchmark") or {})
         freshness = dict(cycle.get("freshness") or {})
         stale = dict(freshness.get("stale") or {})
-        benchmark_stream_fresh = not bool(stale.get("benchmark", True))
+        benchmark_stream_fresh = not bool(stale.get("benchmark_attempt", stale.get("benchmark", True)))
+        benchmark_data_fresh = not bool(stale.get("benchmark", True))
         benchmark_available = bool(benchmark.get("available", False))
-        benchmark_fresh = bool(benchmark_available and benchmark_stream_fresh)
+        benchmark_fresh = bool(benchmark_available and benchmark_data_fresh)
 
         stage = "calibrating"
         if _strategy_mode(strategy_id) == "discovery_only":
@@ -1490,7 +1517,10 @@ def strategies_summary_snapshot() -> dict[str, Any]:
                 "entry_allowed": bool((cycle.get("entry_gate") or {}).get("allowed", False)),
                 "blocked_reasons": list((cycle.get("entry_gate") or {}).get("blocked_reasons", [])),
                 "benchmark_fresh": benchmark_fresh,
+                "benchmark_data_fresh": benchmark_data_fresh,
+                "benchmark_stream_fresh": benchmark_stream_fresh,
                 "benchmark_available": benchmark_available,
+                "benchmark_reason": benchmark.get("reason"),
                 "latest_cycle_ts_utc": cycle.get("ts_utc"),
                 "alerts": list(cycle.get("alerts") or []),
             }
