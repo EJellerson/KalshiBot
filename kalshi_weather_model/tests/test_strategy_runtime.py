@@ -418,3 +418,6 @@ def test_variant_alerts_include_liquidity_block_details():
 
     codes = {str(a.get("code")) for a in alerts}
     assert "liquidity_blocked_weather_temp_high" in codes
+    msg = next(str(a.get("message")) for a in alerts if str(a.get("code")) == "liquidity_blocked_weather_temp_high")
+    assert "spread=0.620 > 0.150 (fail)" in msg
+    assert "depth=3.0 < 10.0 (fail)" in msg
