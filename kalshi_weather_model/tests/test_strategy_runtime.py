@@ -519,3 +519,62 @@ def test_variant_alerts_include_liquidity_block_details():
     msg = next(str(a.get("message")) for a in alerts if str(a.get("code")) == "liquidity_blocked_weather_temp_high")
     assert "spread=0.620 > 0.150 (fail)" in msg
     assert "depth=3.0 < 10.0 (fail)" in msg
+
+
+def test_variant_alerts_benchmark_unavailable_downgraded_during_train_warmup():
+    alerts = runtime._variant_alerts(
+        strategy_id="weather_temp_high",
+        contract_quality={
+            "parse_rate": 1.0,
+            "parse_alert_sample_count": 30,
+            "eligible_count": 5,
+        },
+        freshness={"stale": {"quotes": False, "signals": False, "benchmark": False}},
+        liquidity={"qualified": True, "last_window": {}},
+        train_gate_pass=False,
+        train_gate_reasons=["NYC: observations 10 < 90"],
+        benchmark_available=False,
+    )
+    match = next(a for a in alerts if str(a.get("code")) == "stale_benchmark_weather_temp_high")
+    assert match["severity"] == "warn"
+    assert "train warmup" in str(match.get("message", ""))
+
+
+def test_variant_alerts_benchmark_unavailable_critical_after_train_pass():
+    alerts = runtime._variant_alerts(
+        strategy_id="weather_temp_high",
+        contract_quality={
+            "parse_rate": 1.0,
+            "parse_alert_sample_count": 30,
+            "eligible_count": 5,
+        },
+        freshness={"stale": {"quotes": False, "signals": False, "benchmark": False}},
+        liquidity={"qualified": True, "last_window": {}},
+        train_gate_pass=True,
+        train_gate_reasons=[],
+        benchmark_available=False,
+    )
+    match = next(a for a in alerts if str(a.get("code")) == "stale_benchmark_weather_temp_high")
+    assert match["severity"] == "critical"
+
+
+def test_strategies_summary_benchmark_fresh_requires_availability(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    safe_write_json_atomic(
+        config.strategy_runtime_cycle_path(strategy_id),
+        {
+            "entry_gate": {"allowed": False, "blocked_reasons": ["benchmark"]},
+            "freshness": {"stale": {"benchmark": False}},
+            "benchmark": {"available": False},
+            "alerts": [],
+            "ts_utc": "2026-03-03T12:00:00+00:00",
+        },
+    )
+    safe_write_json_atomic(config.strategy_runtime_gates_path(strategy_id), {"train": {"pass": False}, "paper": {"pass": False}})
+
+    out = runtime.strategies_summary_snapshot()
+    rows = {str(r.get("strategy_id")): r for r in list(out.get("rows", []))}
+    row = rows[strategy_id]
+    assert row["benchmark_available"] is False
+    assert row["benchmark_fresh"] is False
