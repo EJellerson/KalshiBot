@@ -1104,6 +1104,8 @@
             entry_allowed: s.entry_allowed ? "YES" : "NO",
             blocked_reasons: (s.blocked_reasons || []).join(" | "),
             benchmark_fresh: s.benchmark_fresh === undefined ? "-" : (s.benchmark_fresh ? "YES" : "NO"),
+            benchmark_available: s.benchmark_available === undefined ? "-" : (s.benchmark_available ? "YES" : "NO"),
+            benchmark_stream_fresh: s.benchmark_stream_fresh === undefined ? "-" : (s.benchmark_stream_fresh ? "YES" : "NO"),
           };
         });
 
@@ -1120,6 +1122,8 @@
           eligible: (v) => (v === "YES" ? "good" : "warn"),
           entry_allowed: (v) => (v === "YES" ? "good" : "warn"),
           benchmark_fresh: (v) => (v === "YES" ? "good" : "warn"),
+          benchmark_available: (v) => (v === "YES" ? "good" : "warn"),
+          benchmark_stream_fresh: (v) => (v === "YES" ? "good" : "warn"),
           drawdown: (v) => (Number(v || 0) < -0.06 ? "bad" : ""),
           ev_day: (v) => (Number(v || 0) > 0 ? "good" : ""),
         };
@@ -1294,7 +1298,7 @@
                   <h2>Strategy Leaderboard (Shadow Mode)</h2>
                   <DataTable
                     rows={mergedLeaderboardRows}
-                    preferredCols={["rank", "strategy_id", "score", "eligible", "stage", "entry_allowed", "benchmark_fresh", "trading_days", "trades", "ev_day", "drawdown", "blocked_reasons"]}
+                    preferredCols={["rank", "strategy_id", "score", "eligible", "stage", "entry_allowed", "benchmark_fresh", "benchmark_available", "benchmark_stream_fresh", "trading_days", "trades", "ev_day", "drawdown", "blocked_reasons"]}
                     emptyMessage="No strategy leaderboard yet"
                     colorRules={leaderboardColorRules}
                   />
@@ -1502,10 +1506,12 @@
                       stage: r.stage,
                       entry_allowed: r.entry_allowed ? "YES" : "NO",
                       benchmark_fresh: r.benchmark_fresh ? "YES" : "NO",
+                      benchmark_available: r.benchmark_available ? "YES" : "NO",
+                      benchmark_stream_fresh: r.benchmark_stream_fresh ? "YES" : "NO",
                       blocked_reasons: (r.blocked_reasons || []).join(" | "),
                       latest_cycle_ts_utc: r.latest_cycle_ts_utc || "",
                     }))}
-                    preferredCols={["strategy_id", "mode", "stage", "entry_allowed", "benchmark_fresh", "blocked_reasons", "latest_cycle_ts_utc"]}
+                    preferredCols={["strategy_id", "mode", "stage", "entry_allowed", "benchmark_fresh", "benchmark_available", "benchmark_stream_fresh", "blocked_reasons", "latest_cycle_ts_utc"]}
                     emptyMessage="No strategy summary yet"
                     colorRules={leaderboardColorRules}
                   />

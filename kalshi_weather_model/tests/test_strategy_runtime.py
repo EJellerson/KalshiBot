@@ -173,6 +173,78 @@ def test_entry_gate_blocks_on_train_gate_failure():
     assert checks["train_ok"] is False
 
 
+def test_compute_freshness_uses_last_successful_benchmark_timestamp(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now_utc = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+    success_ts = (now_utc - timedelta(hours=4)).isoformat(timespec="seconds")
+    attempt_ts = now_utc.isoformat(timespec="seconds")
+
+    safe_write_json_atomic(
+        config.strategy_benchmark_latest_path(strategy_id),
+        {
+            "strategy_id": strategy_id,
+            "updated_at": attempt_ts,
+            "last_attempted_at_utc": attempt_ts,
+            "last_successful_updated_at_utc": success_ts,
+            "available": False,
+            "reason": "benchmark_fetch_failed: timeout",
+        },
+    )
+
+    out = runtime._compute_freshness(strategy_id, now_utc)
+    stale = dict(out.get("stale") or {})
+    ages = dict(out.get("ages_minutes") or {})
+
+    assert stale["benchmark"] is True
+    assert stale["benchmark_attempt"] is False
+    assert float(ages.get("benchmark", 0.0) or 0.0) >= 240.0
+    assert float(ages.get("benchmark_attempt", 0.0) or 0.0) < 1.0
+
+
+def test_compute_freshness_legacy_unavailable_without_success_is_stale(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now_utc = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+    attempt_ts = now_utc.isoformat(timespec="seconds")
+
+    safe_write_json_atomic(
+        config.strategy_benchmark_latest_path(strategy_id),
+        {
+            "strategy_id": strategy_id,
+            "updated_at": attempt_ts,
+            "available": False,
+            "reason": "legacy_error",
+        },
+    )
+
+    out = runtime._compute_freshness(strategy_id, now_utc)
+    stale = dict(out.get("stale") or {})
+    assert stale["benchmark"] is True
+    assert stale["benchmark_attempt"] is False
+
+
+def test_compute_freshness_legacy_available_falls_back_to_updated_at(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now_utc = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+    updated_ts = (now_utc - timedelta(minutes=30)).isoformat(timespec="seconds")
+
+    safe_write_json_atomic(
+        config.strategy_benchmark_latest_path(strategy_id),
+        {
+            "strategy_id": strategy_id,
+            "updated_at": updated_ts,
+            "available": True,
+            "source": "legacy_noaa",
+        },
+    )
+
+    out = runtime._compute_freshness(strategy_id, now_utc)
+    stale = dict(out.get("stale") or {})
+    assert stale["benchmark"] is False
+
+
 def test_liquidity_uses_worst_side_depth(monkeypatch, tmp_path):
     _patch_config_paths(monkeypatch, tmp_path)
     strategy_id = "weather_temp_high"
@@ -379,6 +451,147 @@ def test_run_strategy_cycle_pre_train_blocks_opening_new_paper_entries(monkeypat
     assert captured["signals"] == []
 
 
+def test_run_strategy_cycle_benchmark_artifact_tracks_attempt_and_success(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+
+    class _ResidualModel:
+        def p_exceeds(self, **_kwargs):
+            return 0.8
+
+    class _FakePublicClient:
+        def get_market_orderbook(self, _ticker: str):
+            return {"orderbook": []}
+
+    monkeypatch.setattr(
+        runtime,
+        "parse_dollar_orderbook",
+        lambda _raw, ticker: {
+            "ticker": ticker,
+            "yes_bid_dollars": 0.49,
+            "yes_ask_dollars": 0.50,
+            "no_bid_dollars": 0.49,
+            "no_ask_dollars": 0.50,
+            "yes_bid_size": 25,
+            "yes_ask_size": 25,
+            "no_bid_size": 25,
+            "no_ask_size": 25,
+        },
+    )
+    monkeypatch.setattr(runtime, "_compute_liquidity_state", lambda *_args, **_kwargs: {"qualified": True})
+    monkeypatch.setattr(runtime, "evaluate_train_gate", lambda _x: {"pass": True, "reasons": []})
+    monkeypatch.setattr(
+        runtime,
+        "run_paper_cycle",
+        lambda *_args, **_kwargs: {"opened": 0, "closed": 0, "open_positions": 0, "equity": 1000.0},
+    )
+
+    payload = {
+        "markets": [
+            {
+                "id": "m1",
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "event_ticker": "KXHIGHNYC-26MAR03",
+                "title": "NYC highest temperature above 75F",
+                "status": "open",
+                "settlement_time": "2026-03-03T23:00:00Z",
+            }
+        ]
+    }
+    context = runtime.StrategyContext(
+        forecast_extremes={"NYC": {"2026-03-03": {"max_f": 80.0, "min_f": 60.0}}},
+        residual_model=_ResidualModel(),
+        thresholds={"global_min_ev_cents": 6.0, "by_city": {"NYC": 6.0}},
+    )
+
+    runtime.run_strategy_cycle(
+        strategy_id,
+        now_utc=now,
+        market_payload=payload,
+        public_client=_FakePublicClient(),
+        context=context,
+    )
+    benchmark = runtime.safe_read_json(config.strategy_benchmark_latest_path(strategy_id)) or {}
+    expected_ts = now.isoformat(timespec="seconds")
+    assert benchmark.get("available") is True
+    assert benchmark.get("updated_at") == expected_ts
+    assert benchmark.get("last_attempted_at_utc") == expected_ts
+    assert benchmark.get("last_successful_updated_at_utc") == expected_ts
+
+
+def test_run_strategy_cycle_failure_preserves_last_successful_benchmark_timestamp(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    previous_success = "2026-03-02T15:00:00+00:00"
+
+    class _FakePublicClient:
+        def get_market_orderbook(self, _ticker: str):
+            return {"orderbook": []}
+
+    safe_write_json_atomic(
+        config.strategy_benchmark_latest_path(strategy_id),
+        {
+            "strategy_id": strategy_id,
+            "updated_at": previous_success,
+            "available": True,
+            "source": "legacy_noaa",
+        },
+    )
+
+    monkeypatch.setattr(
+        runtime,
+        "parse_dollar_orderbook",
+        lambda _raw, ticker: {
+            "ticker": ticker,
+            "yes_bid_dollars": 0.49,
+            "yes_ask_dollars": 0.50,
+            "no_bid_dollars": 0.49,
+            "no_ask_dollars": 0.50,
+            "yes_bid_size": 25,
+            "yes_ask_size": 25,
+            "no_bid_size": 25,
+            "no_ask_size": 25,
+        },
+    )
+    monkeypatch.setattr(runtime, "_compute_liquidity_state", lambda *_args, **_kwargs: {"qualified": True})
+    monkeypatch.setattr(runtime, "evaluate_train_gate", lambda _x: {"pass": False, "reasons": ["NYC: observations 0 < 90"]})
+    monkeypatch.setattr(runtime, "build_strategy_context", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("noaa down")))
+    monkeypatch.setattr(
+        runtime,
+        "run_paper_cycle",
+        lambda *_args, **_kwargs: {"opened": 0, "closed": 0, "open_positions": 0, "equity": 1000.0},
+    )
+
+    payload = {
+        "markets": [
+            {
+                "id": "m1",
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "event_ticker": "KXHIGHNYC-26MAR03",
+                "title": "NYC highest temperature above 75F",
+                "status": "open",
+                "settlement_time": "2026-03-03T23:00:00Z",
+            }
+        ]
+    }
+
+    runtime.run_strategy_cycle(
+        strategy_id,
+        now_utc=now,
+        market_payload=payload,
+        public_client=_FakePublicClient(),
+        context=None,
+    )
+    benchmark = runtime.safe_read_json(config.strategy_benchmark_latest_path(strategy_id)) or {}
+    expected_ts = now.isoformat(timespec="seconds")
+    assert benchmark.get("available") is False
+    assert benchmark.get("updated_at") == expected_ts
+    assert benchmark.get("last_attempted_at_utc") == expected_ts
+    assert benchmark.get("last_successful_updated_at_utc") == previous_success
+
+
 def test_portfolio_leaderboard_is_deterministic(monkeypatch, tmp_path):
     _patch_config_paths(monkeypatch, tmp_path)
 
@@ -558,6 +771,25 @@ def test_variant_alerts_benchmark_unavailable_critical_after_train_pass():
     assert match["severity"] == "critical"
 
 
+def test_variant_alerts_benchmark_unavailable_emits_single_alert_when_stale():
+    alerts = runtime._variant_alerts(
+        strategy_id="weather_temp_high",
+        contract_quality={
+            "parse_rate": 1.0,
+            "parse_alert_sample_count": 30,
+            "eligible_count": 5,
+        },
+        freshness={"stale": {"quotes": False, "signals": False, "benchmark": True}},
+        liquidity={"qualified": True, "last_window": {}},
+        train_gate_pass=False,
+        train_gate_reasons=["NYC: observations 10 < 90"],
+        benchmark_available=False,
+    )
+    matches = [a for a in alerts if str(a.get("code")) == "stale_benchmark_weather_temp_high"]
+    assert len(matches) == 1
+    assert "train warmup" in str(matches[0].get("message", ""))
+
+
 def test_strategies_summary_benchmark_fresh_requires_availability(monkeypatch, tmp_path):
     _patch_config_paths(monkeypatch, tmp_path)
     strategy_id = "weather_temp_high"
@@ -577,4 +809,58 @@ def test_strategies_summary_benchmark_fresh_requires_availability(monkeypatch, t
     rows = {str(r.get("strategy_id")): r for r in list(out.get("rows", []))}
     row = rows[strategy_id]
     assert row["benchmark_available"] is False
+    assert row["benchmark_data_fresh"] is True
+    assert row["benchmark_stream_fresh"] is True
     assert row["benchmark_fresh"] is False
+
+
+def test_strategies_summary_benchmark_field_matrix(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+
+    fixtures = [
+        (
+            "weather_temp_high",
+            {
+                "freshness": {"stale": {"benchmark": False, "benchmark_attempt": False}},
+                "benchmark": {"available": True, "reason": None},
+            },
+            {"benchmark_data_fresh": True, "benchmark_stream_fresh": True, "benchmark_fresh": True},
+        ),
+        (
+            "weather_temp_low",
+            {
+                "freshness": {"stale": {"benchmark": False, "benchmark_attempt": False}},
+                "benchmark": {"available": False, "reason": "fetch_failed"},
+            },
+            {"benchmark_data_fresh": True, "benchmark_stream_fresh": True, "benchmark_fresh": False},
+        ),
+        (
+            "weather_temp_bucket",
+            {
+                "freshness": {"stale": {"benchmark": True, "benchmark_attempt": False}},
+                "benchmark": {"available": True, "reason": None},
+            },
+            {"benchmark_data_fresh": False, "benchmark_stream_fresh": True, "benchmark_fresh": False},
+        ),
+    ]
+
+    for strategy_id, cycle_payload, _expected in fixtures:
+        safe_write_json_atomic(
+            config.strategy_runtime_cycle_path(strategy_id),
+            {
+                "entry_gate": {"allowed": False, "blocked_reasons": ["benchmark"]},
+                "alerts": [],
+                "ts_utc": "2026-03-03T12:00:00+00:00",
+                **cycle_payload,
+            },
+        )
+        safe_write_json_atomic(config.strategy_runtime_gates_path(strategy_id), {"train": {"pass": False}, "paper": {"pass": False}})
+
+    out = runtime.strategies_summary_snapshot()
+    rows = {str(r.get("strategy_id")): r for r in list(out.get("rows", []))}
+
+    for strategy_id, _payload, expected in fixtures:
+        row = rows[strategy_id]
+        assert row["benchmark_data_fresh"] is expected["benchmark_data_fresh"]
+        assert row["benchmark_stream_fresh"] is expected["benchmark_stream_fresh"]
+        assert row["benchmark_fresh"] is expected["benchmark_fresh"]
