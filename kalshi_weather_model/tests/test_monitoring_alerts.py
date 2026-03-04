@@ -192,3 +192,15 @@ def test_inventory_contracts_use_strategy_aggregate_first(monkeypatch, tmp_path)
     assert snapshot.get("contracts_source") == "strategy_aggregate"
     assert snapshot.get("contracts_latest_mtime_utc") is not None
     assert snapshot.get("contracts_age_minutes") is not None
+
+
+def test_inventory_empty_streams_are_marked_stale(monkeypatch, tmp_path) -> None:
+    _patch_monitoring_paths(monkeypatch, tmp_path)
+
+    snapshot = monitoring.data_inventory_snapshot()
+    stale_streams = set(snapshot.get("stale_streams") or [])
+
+    assert "forecasts" in stale_streams
+    assert "observations" in stale_streams
+    assert "quotes" in stale_streams
+    assert "signals" in stale_streams

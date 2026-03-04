@@ -347,6 +347,7 @@ def run_live_cycle(
     state_path: Path = config.LIVE_POSITIONS_PATH,
     blotter_dir: Path = config.LIVE_BLOTTER_DIR,
     live_routing_enabled: bool | None = None,
+    allow_new_entries: bool = True,
 ) -> dict[str, Any]:
     effective_live_routing = (
         bool(config.ALLOW_LIVE_TRADING)
@@ -386,19 +387,29 @@ def run_live_cycle(
             "reason": "consecutive_loss_halt",
             "limits": state.get("live_limits", {}),
         }
-    if not effective_live_routing:
-        safe_write_json_atomic(state_path, state)
-        return {
-            "opened": 0,
-            "closed": 0,
-            "blocked": True,
-            "reason": "live_routing_disabled",
-            "limits": state.get("live_limits", {}),
-        }
 
     open_positions = list(state.get("open_positions", []))
     closed_positions = list(state.get("closed_positions", []))
     open_positions, entry_reconcile_counts, reconcile_alerts = _reconcile_optimistic_entries(open_positions, now_utc, auth_client)
+
+    cycle_alerts = list(reconcile_alerts)
+    entry_block_reasons: list[str] = []
+    if not effective_live_routing:
+        entry_block_reasons.append("live_routing_disabled")
+    if not allow_new_entries:
+        entry_block_reasons.append("entries_blocked_by_policy")
+    if effective_live_routing and auth_client is None:
+        entry_block_reasons.append("live_auth_client_missing")
+        cycle_alerts.append(
+            {
+                "severity": "critical",
+                "code": "live_auth_client_missing",
+                "message": "Live routing is enabled but no auth client is available for order routing.",
+            }
+        )
+
+    entries_allowed = allow_new_entries and effective_live_routing and auth_client is not None
+    exits_routable = effective_live_routing and auth_client is not None
 
     signal_ev_map: dict[str, float] = {}
     for raw in signals:
@@ -472,16 +483,19 @@ def run_live_cycle(
             "reduce_only": True,
             "time_in_force": "fill_or_kill",
         }
-        if auth_client is None:
-            raise RuntimeError("live routing enabled but no auth client was provided")
-        try:
-            broker_resp = auth_client.place_order(**payload)
-            filled = _exit_filled(broker_resp)
-            exit_error = ""
-        except Exception as exc:
+        if exits_routable and auth_client is not None:
+            try:
+                broker_resp = auth_client.place_order(**payload)
+                filled = _exit_filled(broker_resp)
+                exit_error = ""
+            except Exception as exc:
+                broker_resp = {}
+                filled = False
+                exit_error = str(exc)
+        else:
             broker_resp = {}
             filled = False
-            exit_error = str(exc)
+            exit_error = "live_routing_disabled" if not effective_live_routing else "live_auth_client_missing"
 
         exit_order_events.append(
             {
@@ -549,105 +563,131 @@ def run_live_cycle(
 
     opened = 0
     order_events: list[dict[str, Any]] = []
+    halt_new_entries = False
+    if entries_allowed:
+        for raw in signals:
+            ticker = str(raw.get("ticker", ""))
+            if any(str(p.get("ticker", "")) == ticker for p in open_positions):
+                continue
+            if not can_open_more(len(open_positions), limits):
+                break
+            if halt_new_entries:
+                break
 
-    for raw in signals:
-        ticker = str(raw.get("ticker", ""))
-        if any(str(p.get("ticker", "")) == ticker for p in open_positions):
-            continue
-        if not can_open_more(len(open_positions), limits):
-            break
+            ev_cents = float(raw.get("ev_cents", 0.0) or 0.0)
+            if ev_cents < float(raw.get("min_ev_cents", config.BOOTSTRAP_MIN_EV_CENTS)):
+                continue
 
-        ev_cents = float(raw.get("ev_cents", 0.0) or 0.0)
-        if ev_cents < float(raw.get("min_ev_cents", config.BOOTSTRAP_MIN_EV_CENTS)):
-            continue
+            side = str(raw.get("side", "buy_yes"))
+            quote_raw = quote_map.get(ticker)
+            if not quote_raw:
+                continue
+            quote = _to_quote(quote_raw)
+            if not spread_ok(quote, side=side) or not depth_ok(quote):
+                continue
 
-        side = str(raw.get("side", "buy_yes"))
-        quote_raw = quote_map.get(ticker)
-        if not quote_raw:
-            continue
-        quote = _to_quote(quote_raw)
-        if not spread_ok(quote, side=side) or not depth_ok(quote):
-            continue
+            entry_price = _entry_price(quote, side)
+            requested_contracts = contracts_for_notional(entry_price, limits.max_position_dollars)
+            contracts, cap_reason = cap_contracts_to_top_of_book(
+                requested_contracts,
+                quote,
+                side,
+                action="entry",
+            )
+            if contracts < requested_contracts:
+                capped_entry_count += 1
+            if contracts <= 0:
+                depth_skipped_count += 1
+                continue
 
-        entry_price = _entry_price(quote, side)
-        requested_contracts = contracts_for_notional(entry_price, limits.max_position_dollars)
-        contracts, cap_reason = cap_contracts_to_top_of_book(
-            requested_contracts,
-            quote,
-            side,
-            action="entry",
-        )
-        if contracts < requested_contracts:
-            capped_entry_count += 1
-        if contracts <= 0:
-            depth_skipped_count += 1
-            continue
+            new_notional = open_notional + (entry_price * contracts)
+            if equity > 0 and (new_notional / equity) > config.LIVE_MAX_NOTIONAL_UTILIZATION:
+                continue
 
-        new_notional = open_notional + (entry_price * contracts)
-        if equity > 0 and (new_notional / equity) > config.LIVE_MAX_NOTIONAL_UTILIZATION:
-            continue
-
-        placed = False
-        broker_resp: dict[str, Any] | None = None
-        if effective_live_routing:
-            if auth_client is None:
-                raise RuntimeError("live routing enabled but no auth client was provided")
             payload = {
                 "ticker": ticker,
                 "side": side,
                 "count": contracts,
                 "yes_price_dollars": entry_price if side == "buy_yes" else None,
                 "no_price_dollars": entry_price if side == "buy_no" else None,
+                "time_in_force": "gtc",
             }
-            broker_resp = auth_client.place_order(**payload)
-            placed = True
+            placed = False
+            submission_uncertain = False
+            entry_error = ""
+            try:
+                broker_resp = auth_client.place_order(**payload)
+                placed = True
+            except Exception as exc:
+                # Treat submit errors as potentially accepted to avoid duplicate buy-to-open retries.
+                broker_resp = {}
+                placed = True
+                submission_uncertain = True
+                entry_error = str(exc)
+                halt_new_entries = True
+                cycle_alerts.append(
+                    {
+                        "severity": "warn",
+                        "code": "live_entry_submit_error",
+                        "message": "Live entry submit raised an exception; order assumed sent and further entries halted.",
+                        "ticker": ticker,
+                        "error": entry_error,
+                    }
+                )
 
-        pos_id = int(state.get("next_position_id", 1) or 1)
-        state["next_position_id"] = pos_id + 1
-        settlement_ts = raw.get("settlement_ts_utc") or (now_utc + timedelta(days=1)).isoformat()
-        settlement_dt = _parse_iso_utc(settlement_ts) or (now_utc + timedelta(days=1))
-        max_hold = min(
-            now_utc + timedelta(hours=config.MAX_HOLD_HOURS),
-            settlement_dt - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
-        )
+            pos_id = int(state.get("next_position_id", 1) or 1)
+            state["next_position_id"] = pos_id + 1
+            settlement_ts = raw.get("settlement_ts_utc") or (now_utc + timedelta(days=1)).isoformat()
+            settlement_dt = _parse_iso_utc(settlement_ts) or (now_utc + timedelta(days=1))
+            max_hold = min(
+                now_utc + timedelta(hours=config.MAX_HOLD_HOURS),
+                settlement_dt - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
+            )
 
-        pos = {
-            "position_id": f"live_{pos_id}",
-            "ticker": ticker,
-            "city": str(raw.get("city", "")),
-            "side": side,
-            "contracts": contracts,
-            "entry_price_dollars": entry_price,
-            "entry_fees_dollars": contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS,
-            "opened_at_utc": now_utc.isoformat(),
-            "max_hold_until_utc": max_hold.isoformat(),
-            "settlement_ts_utc": settlement_ts,
-            "status": "open",
-            "live_order_submitted": placed,
-            "live_order_response": broker_resp or {},
-            "entry_status": "pending_confirmation",
-            "entry_submitted_at_utc": now_utc.isoformat(),
-            "entry_last_checked_at_utc": now_utc.isoformat(),
-            "entry_reconcile_notes": "awaiting_broker_confirmation",
-            "requested_contracts": requested_contracts,
-            "capped_contracts": contracts,
-            "cap_reason": cap_reason,
-        }
-        open_positions.append(pos)
-        open_notional = new_notional
-        opened += 1
-        order_events.append(
-            {
+            pos = {
+                "position_id": f"live_{pos_id}",
                 "ticker": ticker,
+                "city": str(raw.get("city", "")),
                 "side": side,
                 "contracts": contracts,
+                "entry_price_dollars": entry_price,
+                "entry_fees_dollars": contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS,
+                "opened_at_utc": now_utc.isoformat(),
+                "max_hold_until_utc": max_hold.isoformat(),
+                "settlement_ts_utc": settlement_ts,
+                "status": "open",
+                "live_order_submitted": placed,
+                "live_order_response": broker_resp or {},
+                "entry_status": "pending_confirmation",
+                "entry_submitted_at_utc": now_utc.isoformat(),
+                "entry_last_checked_at_utc": now_utc.isoformat(),
+                "entry_reconcile_notes": (
+                    "entry_submit_error_assumed_sent" if submission_uncertain else "awaiting_broker_confirmation"
+                ),
+                "entry_submission_uncertain": submission_uncertain,
                 "requested_contracts": requested_contracts,
                 "capped_contracts": contracts,
                 "cap_reason": cap_reason,
-                "entry_price": entry_price,
-                "live_order_submitted": placed,
             }
-        )
+            if entry_error:
+                pos["live_order_submit_error"] = entry_error
+            open_positions.append(pos)
+            open_notional = new_notional
+            opened += 1
+            order_events.append(
+                {
+                    "ticker": ticker,
+                    "side": side,
+                    "contracts": contracts,
+                    "requested_contracts": requested_contracts,
+                    "capped_contracts": contracts,
+                    "cap_reason": cap_reason,
+                    "entry_price": entry_price,
+                    "live_order_submitted": placed,
+                    "submission_uncertain": submission_uncertain,
+                    "error": entry_error or None,
+                }
+            )
 
     state["open_positions"] = open_positions
     state["closed_positions"] = closed_positions
@@ -668,7 +708,7 @@ def run_live_cycle(
                     "capped_exits": capped_exit_count,
                     "depth_skipped": depth_skipped_count,
                     "entry_reconciliation": entry_reconcile_counts,
-                    "alerts": reconcile_alerts,
+                    "alerts": cycle_alerts,
                     "limits": state.get("live_limits", {}),
                 },
                 default=str,
@@ -676,9 +716,13 @@ def run_live_cycle(
             + "\n"
         )
 
+    blocked = bool(entry_block_reasons)
+    reason = entry_block_reasons[0] if entry_block_reasons else None
     return {
         "opened": opened,
         "closed": closed,
+        "blocked": blocked,
+        "reason": reason,
         "orders": order_events,
         "exit_orders": exit_order_events,
         "capped_entries": capped_entry_count,
@@ -687,6 +731,7 @@ def run_live_cycle(
         "pending": entry_reconcile_counts["pending"],
         "confirmed": entry_reconcile_counts["confirmed"],
         "unconfirmed": entry_reconcile_counts["unconfirmed"],
-        "alerts": reconcile_alerts,
+        "alerts": cycle_alerts,
+        "entry_block_reasons": entry_block_reasons,
         "limits": state.get("live_limits", {}),
     }

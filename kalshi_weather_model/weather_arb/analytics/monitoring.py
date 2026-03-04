@@ -301,7 +301,7 @@ def data_inventory_snapshot() -> dict[str, Any]:
         age = _minutes_since((inventory.get(stream) or {}).get("latest_mtime_utc"), now_utc)
         stream_age_minutes[stream] = age
         threshold = thresholds.get(stream)
-        if age is not None and threshold is not None and age > threshold:
+        if threshold is not None and (age is None or age > threshold):
             stale_streams.append(stream)
 
     inventory["stream_age_minutes"] = stream_age_minutes

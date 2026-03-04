@@ -981,30 +981,11 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
         artifact_ts = artifact_ts.replace(tzinfo=timezone.utc)
     age_minutes = max(0.0, (now - artifact_ts.astimezone(timezone.utc)).total_seconds() / 60.0)
     max_age_minutes = float(config.SCHEDULER_INTERVAL_MINUTES * 2)
+    entry_block_reasons: list[str] = []
     if age_minutes > max_age_minutes:
-        out = {
-            "skipped": True,
-            "reason": "strategy_live_input_stale",
-            "strategy_champion": strategy_champion,
-            "artifact_age_minutes": round(age_minutes, 2),
-            "max_age_minutes": max_age_minutes,
-            "live_routing": live_status,
-        }
-        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
-        print(json.dumps(out, indent=2, default=str))
-        return
-
+        entry_block_reasons.append("strategy_live_input_stale")
     if not bool(live_input.get("entry_allowed", False)):
-        out = {
-            "skipped": True,
-            "reason": "strategy_entry_gate_blocked",
-            "strategy_champion": strategy_champion,
-            "blocked_reasons": list(live_input.get("blocked_reasons") or []),
-            "live_routing": live_status,
-        }
-        _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
-        print(json.dumps(out, indent=2, default=str))
-        return
+        entry_block_reasons.append("strategy_entry_gate_blocked")
 
     signals = list(live_input.get("signals") or [])
     quote_map = dict(live_input.get("quote_map") or {})
@@ -1012,15 +993,36 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
     append_quote_rows(list(quote_map.values()), now)
     append_signal_rows(signals, now)
 
+    signals_for_cycle = signals if not entry_block_reasons else []
     live_enabled = bool(live_status.get("enabled", False))
-    auth_client = KalshiAuthClient() if live_enabled else None
+    state_snapshot = safe_read_json(config.LIVE_POSITIONS_PATH) or {}
+    has_open_positions = bool(list(state_snapshot.get("open_positions", [])))
+    has_auth_cfg = bool(config.KALSHI_API_KEY and (config.KALSHI_RSA_KEY_PATH or config.KALSHI_RSA_PRIVATE_KEY))
+    auth_client: KalshiAuthClient | None = None
+    auth_init_error = ""
+    if has_auth_cfg and (live_enabled or has_open_positions):
+        try:
+            auth_client = KalshiAuthClient()
+        except Exception as exc:
+            auth_init_error = str(exc)
+
     summary = run_live_cycle(
-        signals,
+        signals_for_cycle,
         quote_map,
         now,
         auth_client=auth_client,
         live_routing_enabled=live_enabled,
+        allow_new_entries=not entry_block_reasons,
     )
+    if auth_init_error:
+        summary.setdefault("alerts", []).append(
+            {
+                "severity": "warn",
+                "code": "live_auth_init_error",
+                "message": "Unable to initialize Kalshi auth client for reconciliation.",
+                "error": auth_init_error,
+            }
+        )
 
     # Settlement reconciliation when auth is available.
     if auth_client is not None:
@@ -1063,6 +1065,9 @@ def cmd_live_cycle(_args: argparse.Namespace) -> None:
         "strategy_champion": strategy_champion or None,
         "model_champion_id": champion_model.get("model_id") if champion_model else None,
         "artifact_age_minutes": round(age_minutes, 2),
+        "entry_blocked": bool(entry_block_reasons),
+        "entry_block_reasons": entry_block_reasons,
+        "blocked_reasons": list(live_input.get("blocked_reasons") or []),
     }
     _append_governance_log({"ts": now.isoformat(), "event": "live_cycle", **out})
     print(json.dumps(out, indent=2, default=str))

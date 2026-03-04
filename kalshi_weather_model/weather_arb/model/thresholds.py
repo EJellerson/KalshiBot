@@ -73,8 +73,8 @@ def calibrate_min_ev_threshold(
         avg_notional = mean(notional) if notional else 1.0
         roi_per_trade = (mean(pnl_values) / max(avg_notional, 1e-9))
 
-        # Score favors daily pnl and penalizes negative ROI.
-        score = avg_daily_pnl + (50.0 * max(roi_per_trade, -0.1))
+        # Score favors daily pnl and scales directly with ROI quality.
+        score = avg_daily_pnl + (50.0 * roi_per_trade)
 
         if (score > best.score + eps) or (abs(score - best.score) <= eps and threshold > best.min_ev_cents):
             best = CalibrationOutcome(
