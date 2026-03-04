@@ -277,6 +277,25 @@ def build_strategy_context(now_utc: datetime, noaa: NOAAClient | None = None) ->
     )
 
 
+def _temperature_train_gate_snapshot() -> dict[str, Any]:
+    observation_rows = _read_all_parquet_rows(config.OBSERVATIONS_DIR)
+    city_days: dict[str, set[str]] = {city: set() for city in config.CITIES}
+    for row in observation_rows:
+        city = str(row.get("city", ""))
+        day_key = str(row.get("obs_date_local", ""))
+        if city in city_days and day_key:
+            city_days[city].add(day_key)
+    train_input = {
+        city: {
+            "observations": len(days),
+            "missing_pct": max(config.TRAIN_MIN_OBSERVATIONS_PER_CITY - len(days), 0)
+            / max(config.TRAIN_MIN_OBSERVATIONS_PER_CITY, 1),
+        }
+        for city, days in city_days.items()
+    }
+    return evaluate_train_gate(train_input)
+
+
 def _compute_contract_quality(
     strategy_id: str,
     market_payload: dict[str, Any],
@@ -609,6 +628,8 @@ def _variant_alerts(
     contract_quality: dict[str, Any],
     freshness: dict[str, Any],
     liquidity: dict[str, Any],
+    train_gate_pass: bool,
+    train_gate_reasons: list[str] | None,
     benchmark_available: bool,
 ) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
@@ -658,6 +679,21 @@ def _variant_alerts(
         alerts.append({"severity": "warn", "code": f"stale_signals_{strategy_id}", "message": "Signals stream is stale."})
     if stale.get("benchmark"):
         alerts.append({"severity": "warn", "code": f"stale_benchmark_{strategy_id}", "message": "Benchmark stream is stale."})
+
+    if is_tradable_strategy(strategy_id) and not bool(train_gate_pass):
+        reasons = [str(r) for r in (train_gate_reasons or []) if str(r).strip()]
+        reason_txt = "requirements not met"
+        if reasons:
+            reason_txt = reasons[0]
+            if len(reasons) > 1:
+                reason_txt = f"{reason_txt} (+{len(reasons) - 1} more)"
+        alerts.append(
+            {
+                "severity": "warn",
+                "code": f"train_gate_blocked_{strategy_id}",
+                "message": f"Train gate blocked entries ({reason_txt}).",
+            }
+        )
 
     if is_tradable_strategy(strategy_id) and not bool(liquidity.get("qualified", False)):
         last_window = dict(liquidity.get("last_window") or {})
@@ -719,6 +755,7 @@ def _entry_gate(
     freshness: dict[str, Any],
     liquidity: dict[str, Any],
     benchmark_available: bool,
+    train_gate_pass: bool = True,
 ) -> tuple[bool, list[str], dict[str, bool]]:
     parse_ok = float(contract_quality.get("parse_rate", 0.0) or 0.0) >= float(config.STRATEGY_PARSE_RATE_MIN)
     eligible_ok = int(contract_quality.get("eligible_count", 0) or 0) >= int(config.STRATEGY_MIN_ELIGIBLE_CONTRACTS)
@@ -726,12 +763,14 @@ def _entry_gate(
     stale = dict(freshness.get("stale") or {})
     freshness_ok = not bool(stale.get("contracts") or stale.get("quotes") or stale.get("benchmark"))
     liquidity_ok = bool(liquidity.get("qualified", False))
+    train_ok = (not is_tradable_strategy(strategy_id)) or bool(train_gate_pass)
 
     checks = {
         "parse_ok": bool(parse_ok),
         "eligible_ok": bool(eligible_ok),
         "freshness_ok": bool(freshness_ok),
         "liquidity_ok": bool(liquidity_ok),
+        "train_ok": bool(train_ok),
         "benchmark_ok": bool(benchmark_available),
         "tradable": bool(is_tradable_strategy(strategy_id)),
     }
@@ -747,6 +786,8 @@ def _entry_gate(
         reasons.append("freshness")
     if not checks["liquidity_ok"]:
         reasons.append("liquidity")
+    if not checks["train_ok"]:
+        reasons.append("train_gate")
     if not checks["benchmark_ok"]:
         reasons.append("benchmark")
 
@@ -844,6 +885,9 @@ def run_strategy_cycle(
     signals: list[dict[str, Any]] = []
     signal_skipped: list[dict[str, Any]] = []
     eligible_count = 0
+    train_gate_snapshot = {"pass": True, "reasons": []}
+    if is_tradable_strategy(strategy_id):
+        train_gate_snapshot = _temperature_train_gate_snapshot()
 
     if strategy_id.startswith("weather_temp") and ctx is not None:
         thresholds = dict(ctx.thresholds or {})
@@ -912,6 +956,7 @@ def run_strategy_cycle(
         contract_quality=contract_quality,
         freshness=freshness,
         liquidity=liquidity,
+        train_gate_pass=bool(train_gate_snapshot.get("pass", False)),
         benchmark_available=benchmark_available,
     )
 
@@ -957,6 +1002,8 @@ def run_strategy_cycle(
         contract_quality=contract_quality,
         freshness=freshness,
         liquidity=liquidity,
+        train_gate_pass=bool(train_gate_snapshot.get("pass", False)),
+        train_gate_reasons=list(train_gate_snapshot.get("reasons", []) or []),
         benchmark_available=benchmark_available,
     )
 
@@ -980,6 +1027,7 @@ def run_strategy_cycle(
             "skipped": len(signal_skipped),
         },
         "benchmark": benchmark,
+        "train_gate": train_gate_snapshot,
         "contract_quality": contract_quality,
         "freshness": freshness,
         "liquidity": liquidity,
@@ -1073,21 +1121,7 @@ def evaluate_strategy_gates(strategy_id: str, now_utc: datetime | None = None) -
     cycle = safe_read_json(config.strategy_runtime_cycle_path(strategy_id)) or {}
 
     if strategy_id.startswith("weather_temp"):
-        observation_rows = _read_all_parquet_rows(config.OBSERVATIONS_DIR)
-        city_days: dict[str, set[str]] = {city: set() for city in config.CITIES}
-        for row in observation_rows:
-            city = str(row.get("city", ""))
-            day_key = str(row.get("obs_date_local", ""))
-            if city in city_days and day_key:
-                city_days[city].add(day_key)
-        train_input = {
-            city: {
-                "observations": len(days),
-                "missing_pct": max(config.TRAIN_MIN_OBSERVATIONS_PER_CITY - len(days), 0) / max(config.TRAIN_MIN_OBSERVATIONS_PER_CITY, 1),
-            }
-            for city, days in city_days.items()
-        }
-        train = evaluate_train_gate(train_input)
+        train = _temperature_train_gate_snapshot()
     else:
         train = {
             "pass": False,
@@ -1131,6 +1165,7 @@ def evaluate_strategy_gates(strategy_id: str, now_utc: datetime | None = None) -
     checks = dict((cycle.get("entry_gate") or {}).get("checks") or {})
     data_health_green = bool(
         checks.get("parse_ok")
+        and checks.get("train_ok", True)
         and checks.get("freshness_ok")
         and checks.get("benchmark_ok")
         and (

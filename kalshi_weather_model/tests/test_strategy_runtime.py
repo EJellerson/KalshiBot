@@ -134,6 +134,7 @@ def test_entry_gate_fail_closed_conditions():
         contract_quality=quality,
         freshness=freshness,
         liquidity=liquidity,
+        train_gate_pass=True,
         benchmark_available=False,
     )
     assert allowed is False
@@ -146,11 +147,30 @@ def test_entry_gate_fail_closed_conditions():
         contract_quality=quality,
         freshness={"stale": {"contracts": False, "quotes": False, "benchmark": False}},
         liquidity={"qualified": True},
+        train_gate_pass=True,
         benchmark_available=True,
     )
     assert allowed2 is False
     assert "discovery_only" in reasons2
     assert checks2["tradable"] is False
+
+
+def test_entry_gate_blocks_on_train_gate_failure():
+    quality = {"parse_rate": 0.9, "eligible_count": 3}
+    freshness = {"stale": {"contracts": False, "quotes": False, "signals": False, "benchmark": False}}
+    liquidity = {"qualified": True}
+
+    allowed, reasons, checks = runtime._entry_gate(
+        strategy_id="weather_temp_high",
+        contract_quality=quality,
+        freshness=freshness,
+        liquidity=liquidity,
+        train_gate_pass=False,
+        benchmark_available=True,
+    )
+    assert allowed is False
+    assert "train_gate" in reasons
+    assert checks["train_ok"] is False
 
 
 def test_liquidity_uses_worst_side_depth(monkeypatch, tmp_path):
@@ -244,6 +264,7 @@ def test_run_strategy_cycle_persists_live_input_artifact(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(runtime, "_compute_liquidity_state", lambda *_args, **_kwargs: {"qualified": True})
+    monkeypatch.setattr(runtime, "evaluate_train_gate", lambda _x: {"pass": True, "reasons": []})
     monkeypatch.setattr(
         runtime,
         "run_paper_cycle",
@@ -281,6 +302,81 @@ def test_run_strategy_cycle_persists_live_input_artifact(monkeypatch, tmp_path):
     assert live_input["strategy_id"] == strategy_id
     assert isinstance(live_input.get("signals"), list) and len(live_input["signals"]) == 1
     assert "KXHIGHNYC-26MAR03-T75" in dict(live_input.get("quote_map") or {})
+
+
+def test_run_strategy_cycle_pre_train_blocks_opening_new_paper_entries(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    captured: dict[str, object] = {}
+
+    class _ResidualModel:
+        def p_exceeds(self, **_kwargs):
+            return 0.8
+
+    class _FakePublicClient:
+        def get_market_orderbook(self, _ticker: str):
+            return {"orderbook": []}
+
+    monkeypatch.setattr(
+        runtime,
+        "parse_dollar_orderbook",
+        lambda _raw, ticker: {
+            "ticker": ticker,
+            "yes_bid_dollars": 0.49,
+            "yes_ask_dollars": 0.50,
+            "no_bid_dollars": 0.49,
+            "no_ask_dollars": 0.50,
+            "yes_bid_size": 25,
+            "yes_ask_size": 25,
+            "no_bid_size": 25,
+            "no_ask_size": 25,
+        },
+    )
+    monkeypatch.setattr(runtime, "_compute_liquidity_state", lambda *_args, **_kwargs: {"qualified": True})
+    monkeypatch.setattr(
+        runtime,
+        "evaluate_train_gate",
+        lambda _x: {"pass": False, "reasons": ["NYC: observations 0 < 90"]},
+    )
+
+    def _capture_paper_cycle(signals, *_args, **_kwargs):
+        captured["signals"] = list(signals)
+        return {"opened": 0, "closed": 0, "open_positions": 0, "equity": 1000.0}
+
+    monkeypatch.setattr(runtime, "run_paper_cycle", _capture_paper_cycle)
+
+    payload = {
+        "markets": [
+            {
+                "id": "m1",
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "event_ticker": "KXHIGHNYC-26MAR03",
+                "title": "NYC highest temperature above 75F",
+                "status": "open",
+                "settlement_time": "2026-03-03T23:00:00Z",
+            }
+        ]
+    }
+    context = runtime.StrategyContext(
+        forecast_extremes={"NYC": {"2026-03-03": {"max_f": 80.0, "min_f": 60.0}}},
+        residual_model=_ResidualModel(),
+        thresholds={"global_min_ev_cents": 6.0, "by_city": {"NYC": 6.0}},
+    )
+
+    out = runtime.run_strategy_cycle(
+        strategy_id,
+        now_utc=now,
+        market_payload=payload,
+        public_client=_FakePublicClient(),
+        context=context,
+    )
+    assert out["signals"]["count"] == 1
+    assert out["entry_gate"]["allowed"] is False
+    assert "train_gate" in list(out["entry_gate"]["blocked_reasons"])
+    assert out["entry_gate"]["checks"]["train_ok"] is False
+    assert out["train_gate"]["pass"] is False
+    assert captured["signals"] == []
 
 
 def test_portfolio_leaderboard_is_deterministic(monkeypatch, tmp_path):
@@ -413,6 +509,8 @@ def test_variant_alerts_include_liquidity_block_details():
                 "thresholds": {"max_spread": 0.15, "min_depth": 10},
             },
         },
+        train_gate_pass=True,
+        train_gate_reasons=[],
         benchmark_available=True,
     )
 
