@@ -40,6 +40,24 @@ def test_parse_orderbook_ladder_dollars_fallback() -> None:
     assert out["no_ask_size"] == 12
 
 
+def test_parse_orderbook_orderbook_fp_dollars_fallback() -> None:
+    payload = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.86", "37.00"], ["0.42", "10.00"]],
+            "no_dollars": [["0.12", "140.00"], ["0.11", "180.00"]],
+        }
+    }
+    out = parse_dollar_orderbook(payload, "TICK")
+    assert out["yes_bid_dollars"] == pytest.approx(0.86)
+    assert out["no_bid_dollars"] == pytest.approx(0.12)
+    assert out["yes_ask_dollars"] == pytest.approx(0.88)
+    assert out["no_ask_dollars"] == pytest.approx(0.14)
+    assert out["yes_bid_size"] == 37
+    assert out["yes_ask_size"] == 140
+    assert out["no_bid_size"] == 140
+    assert out["no_ask_size"] == 37
+
+
 def test_parse_orderbook_ladder_cents_fallback() -> None:
     payload = {"orderbook": {"yes": [[42, 12]], "no": [[56, 9]]}}
     out = parse_dollar_orderbook(payload, "TICK")

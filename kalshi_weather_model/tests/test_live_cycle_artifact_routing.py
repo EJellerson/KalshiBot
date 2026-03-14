@@ -12,15 +12,18 @@ from weather_arb.utils.io_utils import safe_write_json_atomic
 
 def _patch_live_cycle_paths(monkeypatch, tmp_path: Path) -> None:
     live_dir = tmp_path / "live"
+    paper_dir = tmp_path / "paper"
     gov_dir = tmp_path / "governance"
     strategies_dir = tmp_path / "strategies"
     signals_dir = tmp_path / "signals"
     quotes_dir = tmp_path / "market_quotes"
-    for path in [live_dir, gov_dir, strategies_dir, signals_dir, quotes_dir]:
+    for path in [live_dir, paper_dir, gov_dir, strategies_dir, signals_dir, quotes_dir]:
         path.mkdir(parents=True, exist_ok=True)
     (live_dir / "live_blotter").mkdir(parents=True, exist_ok=True)
+    (paper_dir / "paper_blotter").mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(config, "LIVE_DIR", live_dir)
+    monkeypatch.setattr(config, "PAPER_DIR", paper_dir)
     monkeypatch.setattr(config, "GOVERNANCE_DIR", gov_dir)
     monkeypatch.setattr(config, "STRATEGIES_DIR", strategies_dir)
     monkeypatch.setattr(config, "SIGNALS_DIR", signals_dir)
@@ -28,6 +31,9 @@ def _patch_live_cycle_paths(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(config, "LIVE_POSITIONS_PATH", live_dir / "live_positions.json")
     monkeypatch.setattr(config, "LIVE_METRICS_DAILY_PATH", live_dir / "live_metrics_daily.json")
     monkeypatch.setattr(config, "LIVE_BLOTTER_DIR", live_dir / "live_blotter")
+    monkeypatch.setattr(config, "PAPER_POSITIONS_PATH", paper_dir / "paper_positions.json")
+    monkeypatch.setattr(config, "PAPER_METRICS_DAILY_PATH", paper_dir / "paper_metrics_daily.json")
+    monkeypatch.setattr(config, "PAPER_BLOTTER_DIR", paper_dir / "paper_blotter")
     monkeypatch.setattr(config, "GOVERNANCE_LOG_PATH", gov_dir / "governance_log.json")
     monkeypatch.setattr(config, "CHAMPION_STATE_PATH", gov_dir / "champion_state.json")
     monkeypatch.setattr(config, "SCHEDULER_INTERVAL_MINUTES", 15)
@@ -295,3 +301,117 @@ def test_cmd_live_cycle_routes_champion_artifact_signals(monkeypatch, tmp_path, 
     assert out["signals"] == 2
     assert captured["signals"] == signals
     assert captured["quote_map"] == quote_map
+
+
+def test_cmd_paper_cycle_pre_train_blocks_new_entries(monkeypatch, tmp_path, capsys):
+    _patch_live_cycle_paths(monkeypatch, tmp_path)
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main, "_utc_now", lambda: now)
+    monkeypatch.setattr(
+        main,
+        "_build_signals_and_quotes",
+        lambda _now: (
+            [
+                {
+                    "ticker": "KXHIGHNYC-26MAR03-T75",
+                    "city": "NYC",
+                    "side": "buy_yes",
+                    "ev_cents": 12.0,
+                    "min_ev_cents": 6.0,
+                    "settlement_ts_utc": (now + timedelta(hours=10)).isoformat(),
+                }
+            ],
+            {
+                "KXHIGHNYC-26MAR03-T75": {
+                    "ticker": "KXHIGHNYC-26MAR03-T75",
+                    "ts_utc": now.isoformat(),
+                    "yes_bid_dollars": 0.49,
+                    "yes_ask_dollars": 0.50,
+                    "no_bid_dollars": 0.49,
+                    "no_ask_dollars": 0.50,
+                    "yes_bid_size": 25,
+                    "yes_ask_size": 25,
+                    "no_bid_size": 25,
+                    "no_ask_size": 25,
+                }
+            },
+            [],
+        ),
+    )
+    monkeypatch.setattr(main, "append_quote_rows", lambda _rows, _now: None)
+    monkeypatch.setattr(main, "append_signal_rows", lambda _rows, _now: None)
+    monkeypatch.setattr(main, "train_gate_snapshot", lambda: {"gate": {"pass": False}})
+    monkeypatch.setattr(main, "_latest_model_for_status", lambda status: {"model_id": "m1", "status": status} if status == "wf_passed" else None)
+
+    def _capture_run_paper_cycle(signals, quote_map, *_args, **kwargs):
+        captured["signals"] = list(signals)
+        captured["quote_map"] = dict(quote_map)
+        captured["allow_new_entries"] = kwargs.get("allow_new_entries")
+        return {"opened": 0, "closed": 0, "entries_allowed": False}
+
+    monkeypatch.setattr(main, "run_paper_cycle", _capture_run_paper_cycle)
+    main.cmd_paper_cycle(argparse.Namespace())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["entry_blocked"] is True
+    assert out["entry_block_reasons"] == ["train_gate"]
+    assert out["train_gate_pass"] is False
+    assert out["model_status"] == "wf_passed"
+    assert captured["allow_new_entries"] is False
+    assert len(captured["signals"]) == 1
+
+
+def test_cmd_paper_cycle_train_pass_allows_entries(monkeypatch, tmp_path, capsys):
+    _patch_live_cycle_paths(monkeypatch, tmp_path)
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main, "_utc_now", lambda: now)
+    monkeypatch.setattr(main, "_build_signals_and_quotes", lambda _now: ([], {}, []))
+    monkeypatch.setattr(main, "append_quote_rows", lambda _rows, _now: None)
+    monkeypatch.setattr(main, "append_signal_rows", lambda _rows, _now: None)
+    monkeypatch.setattr(main, "train_gate_snapshot", lambda: {"gate": {"pass": True}})
+    monkeypatch.setattr(main, "_latest_model_for_status", lambda status: {"model_id": "m1", "status": status} if status == "wf_passed" else None)
+
+    def _capture_run_paper_cycle(*_args, **kwargs):
+        captured["allow_new_entries"] = kwargs.get("allow_new_entries")
+        return {"opened": 1, "closed": 0, "entries_allowed": True}
+
+    monkeypatch.setattr(main, "run_paper_cycle", _capture_run_paper_cycle)
+    main.cmd_paper_cycle(argparse.Namespace())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["entry_blocked"] is False
+    assert out["entry_block_reasons"] == []
+    assert out["train_gate_pass"] is True
+    assert out["summary"]["opened"] == 1
+    assert captured["allow_new_entries"] is True
+
+
+def test_cmd_paper_cycle_without_model_still_manages_positions(monkeypatch, tmp_path, capsys):
+    _patch_live_cycle_paths(monkeypatch, tmp_path)
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main, "_utc_now", lambda: now)
+    monkeypatch.setattr(main, "_build_signals_and_quotes", lambda _now: ([], {}, []))
+    monkeypatch.setattr(main, "append_quote_rows", lambda _rows, _now: None)
+    monkeypatch.setattr(main, "append_signal_rows", lambda _rows, _now: None)
+    monkeypatch.setattr(main, "train_gate_snapshot", lambda: {"gate": {"pass": True}})
+    monkeypatch.setattr(main, "_latest_model_for_status", lambda _status: None)
+
+    def _capture_run_paper_cycle(*_args, **kwargs):
+        captured["allow_new_entries"] = kwargs.get("allow_new_entries")
+        return {"opened": 0, "closed": 1, "entries_allowed": False}
+
+    monkeypatch.setattr(main, "run_paper_cycle", _capture_run_paper_cycle)
+    main.cmd_paper_cycle(argparse.Namespace())
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["entry_blocked"] is True
+    assert out["entry_block_reasons"] == ["no_eligible_model"]
+    assert out["model_status"] is None
+    assert out["summary"]["closed"] == 1
+    assert captured["allow_new_entries"] is False

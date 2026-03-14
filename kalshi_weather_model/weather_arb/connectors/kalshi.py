@@ -267,13 +267,15 @@ def parse_dollar_orderbook(payload: dict[str, Any], ticker: str) -> dict[str, An
 
     Supports both:
     1) direct top-of-book fields (`yes_bid_dollars`, `yes_ask_dollars`, ...)
-    2) ladder payloads (`orderbook.yes_dollars`, `orderbook.no_dollars`, with cent fallback)
+    2) ladder payloads (`orderbook.yes_dollars`, `orderbook_fp.yes_dollars`, with cent fallback)
     """
     candidates = []
     if isinstance(payload, dict):
         candidates.append(payload)
         if isinstance(payload.get("orderbook"), dict):
             candidates.append(payload["orderbook"])
+        if isinstance(payload.get("orderbook_fp"), dict):
+            candidates.append(payload["orderbook_fp"])
 
     required = [
         "yes_bid_dollars",
