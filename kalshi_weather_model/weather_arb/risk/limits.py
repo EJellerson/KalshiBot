@@ -94,18 +94,64 @@ def paper_limits() -> RiskLimits:
     )
 
 
-def spread_ok(quote: MarketQuote, side: str = "buy_yes") -> bool:
+def _side_bid_ask(quote: MarketQuote, side: str) -> tuple[float, float]:
     if side == "buy_no":
-        if quote.no_ask_dollars <= 0:
-            return False
-        spread = max(0.0, quote.no_ask_dollars - quote.no_bid_dollars)
-        spread_pct = spread / max(quote.no_ask_dollars, 1e-9)
-    else:
-        if quote.yes_ask_dollars <= 0:
-            return False
-        spread = max(0.0, quote.yes_ask_dollars - quote.yes_bid_dollars)
-        spread_pct = spread / max(quote.yes_ask_dollars, 1e-9)
-    return spread_pct <= config.MAX_SPREAD_PCT
+        return float(quote.no_bid_dollars), float(quote.no_ask_dollars)
+    return float(quote.yes_bid_dollars), float(quote.yes_ask_dollars)
+
+
+def hybrid_spread_score(
+    bid_dollars: float,
+    ask_dollars: float,
+    *,
+    pct_limit: float,
+    abs_limit_dollars: float,
+) -> float:
+    bid = float(bid_dollars)
+    ask = float(ask_dollars)
+    if ask <= 0:
+        return float("inf")
+    spread_abs = max(0.0, ask - bid)
+    midpoint = max((ask + bid) / 2.0, 1e-9)
+    allowed_spread = max(float(abs_limit_dollars), float(pct_limit) * midpoint)
+    if allowed_spread <= 0:
+        return float("inf")
+    return spread_abs / allowed_spread
+
+
+def side_spread_metrics(
+    quote: MarketQuote,
+    side: str = "buy_yes",
+    *,
+    pct_limit: float | None = None,
+    abs_limit_dollars: float | None = None,
+) -> dict[str, float]:
+    bid, ask = _side_bid_ask(quote, side)
+    spread_abs = max(0.0, ask - bid)
+    midpoint = max((ask + bid) / 2.0, 1e-9)
+    pct = float(spread_abs / midpoint)
+    pct_cap = float(config.MAX_SPREAD_PCT if pct_limit is None else pct_limit)
+    abs_cap = float(config.MAX_SPREAD_ABS_DOLLARS if abs_limit_dollars is None else abs_limit_dollars)
+    allowed_spread = max(abs_cap, pct_cap * midpoint)
+    score = hybrid_spread_score(
+        bid,
+        ask,
+        pct_limit=pct_cap,
+        abs_limit_dollars=abs_cap,
+    )
+    return {
+        "bid_dollars": bid,
+        "ask_dollars": ask,
+        "spread_abs_dollars": spread_abs,
+        "spread_pct_mid": pct,
+        "midpoint_dollars": midpoint,
+        "allowed_spread_dollars": allowed_spread,
+        "score": score,
+    }
+
+
+def spread_ok(quote: MarketQuote, side: str = "buy_yes") -> bool:
+    return side_spread_metrics(quote, side=side)["score"] <= 1.0
 
 
 def depth_ok(quote: MarketQuote) -> bool:
