@@ -241,7 +241,7 @@ def create_app() -> FastAPI:
             },
             "strategies": strategies_summary_snapshot(),
             "portfolio": {
-                "leaderboard": compute_portfolio_leaderboard(),
+                "leaderboard": safe_read_json(config.PORTFOLIO_RANKINGS_PATH) or {},
                 "champion": safe_read_json(config.CHAMPION_STATE_PATH) or {},
             },
         }

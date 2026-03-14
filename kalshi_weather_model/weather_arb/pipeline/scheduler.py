@@ -100,7 +100,7 @@ class WeatherScheduler:
             self.configure()
         while True:
             schedule.run_pending()
-            time.sleep(1)
+            time.sleep(30)
 
 
 def now_utc() -> datetime:

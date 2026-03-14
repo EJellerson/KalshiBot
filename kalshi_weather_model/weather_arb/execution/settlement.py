@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from weather_arb.config import KALSHI_FEE_PER_CONTRACT_DOLLARS
+from weather_arb.fees import kalshi_trading_fee_dollars
 
 
 def payout_per_contract(side: str, settled_yes: bool) -> float:
@@ -20,11 +20,15 @@ def realized_pnl_from_settlement(
     entry_price_dollars: float,
     contracts: int,
     settled_yes: bool,
-    fee_per_contract: float = KALSHI_FEE_PER_CONTRACT_DOLLARS,
+    entry_fees_dollars: float | None = None,
 ) -> float:
     payout = payout_per_contract(side, settled_yes)
     gross = (payout - entry_price_dollars) * contracts
-    fees = fee_per_contract * contracts
+    fees = (
+        float(entry_fees_dollars)
+        if entry_fees_dollars is not None
+        else kalshi_trading_fee_dollars(contracts, entry_price_dollars)
+    )
     return gross - fees
 
 
@@ -51,6 +55,7 @@ def apply_settlements_to_positions(
             entry_price_dollars=entry_price,
             contracts=contracts,
             settled_yes=settled_yes,
+            entry_fees_dollars=float(pos.get("entry_fees_dollars", 0.0) or 0.0),
         )
 
         out = dict(pos)

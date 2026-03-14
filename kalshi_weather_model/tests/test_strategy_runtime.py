@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 
 from weather_arb import config
+from weather_arb.fees import estimated_entry_cost_cents
+from weather_arb.model.fair_value import compute_ev_cents
 from weather_arb.strategies import runtime
 from weather_arb.utils.io_utils import safe_write_json_atomic
 
@@ -451,6 +453,85 @@ def test_run_strategy_cycle_pre_train_blocks_opening_new_paper_entries(monkeypat
     assert out["train_gate"]["pass"] is False
     assert captured["signals"] == []
     assert captured["allow_new_entries"] is False
+
+
+def test_run_strategy_cycle_signal_ev_uses_formula_based_fee(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+
+    class _ResidualModel:
+        def p_exceeds(self, **_kwargs):
+            return 0.2
+
+    class _FakePublicClient:
+        def get_market_orderbook(self, _ticker: str):
+            return {"orderbook": []}
+
+    monkeypatch.setattr(
+        runtime,
+        "parse_dollar_orderbook",
+        lambda _raw, ticker: {
+            "ticker": ticker,
+            "yes_bid_dollars": 0.00,
+            "yes_ask_dollars": 0.01,
+            "no_bid_dollars": 0.98,
+            "no_ask_dollars": 0.99,
+            "yes_bid_size": 499,
+            "yes_ask_size": 499,
+            "no_bid_size": 499,
+            "no_ask_size": 499,
+        },
+    )
+    monkeypatch.setattr(runtime, "_compute_liquidity_state", lambda *_args, **_kwargs: {"qualified": True})
+    monkeypatch.setattr(runtime, "evaluate_train_gate", lambda _x: {"pass": True, "reasons": []})
+    monkeypatch.setattr(
+        runtime,
+        "run_paper_cycle",
+        lambda *_args, **_kwargs: {"opened": 0, "closed": 0, "open_positions": 0, "equity": 1000.0},
+    )
+
+    payload = {
+        "markets": [
+            {
+                "id": "m1",
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "event_ticker": "KXHIGHNYC-26MAR03",
+                "title": "NYC highest temperature above 75F",
+                "status": "open",
+                "settlement_time": "2026-03-03T23:00:00Z",
+            }
+        ]
+    }
+    context = runtime.StrategyContext(
+        forecast_extremes={"NYC": {"2026-03-03": {"max_f": 80.0, "min_f": 60.0}}},
+        residual_model=_ResidualModel(),
+        thresholds={"global_min_ev_cents": 6.0, "by_city": {"NYC": 6.0}},
+    )
+
+    out = runtime.run_strategy_cycle(
+        strategy_id,
+        now_utc=now,
+        market_payload=payload,
+        public_client=_FakePublicClient(),
+        context=context,
+    )
+
+    signal_rows = pd.read_parquet(config.strategy_signals_dir(strategy_id) / "signals_2026-03-03.parquet")
+    ev_row = signal_rows.to_dict(orient="records")[0]
+    expected_ev = compute_ev_cents(
+        p_fair=0.2,
+        p_market=0.01,
+        est_cost_cents=estimated_entry_cost_cents(
+            0.01,
+            max_position_dollars=config.PAPER_MAX_POSITION_DOLLARS,
+            available_contracts=499,
+            slippage_cents=config.DEFAULT_SLIPPAGE_CENTS,
+        ),
+    )
+
+    assert out["signals"]["count"] == 1
+    assert round(float(ev_row["ev_cents"]), 6) == round(expected_ev, 6)
 
 
 def test_run_strategy_cycle_benchmark_artifact_tracks_attempt_and_success(monkeypatch, tmp_path):
