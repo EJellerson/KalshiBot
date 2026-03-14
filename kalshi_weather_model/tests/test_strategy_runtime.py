@@ -97,6 +97,39 @@ def _write_quotes(
     pd.DataFrame(rows).to_parquet(out_path, index=False)
 
 
+def _write_penny_quotes(
+    strategy_id: str,
+    now_utc: datetime,
+    *,
+    yes_bid: float,
+    yes_ask: float,
+    n: int = 60,
+    depth: int = 12,
+) -> None:
+    rows = []
+    no_bid = 1.0 - yes_ask
+    no_ask = 1.0 - yes_bid
+    for i in range(n):
+        rows.append(
+            {
+                "ticker": f"TICK{i}",
+                "ts_utc": (now_utc - timedelta(minutes=i)).isoformat(timespec="seconds"),
+                "yes_bid_dollars": yes_bid,
+                "yes_ask_dollars": yes_ask,
+                "no_bid_dollars": no_bid,
+                "no_ask_dollars": no_ask,
+                "yes_bid_size": depth,
+                "yes_ask_size": depth,
+                "no_bid_size": depth,
+                "no_ask_size": depth,
+            }
+        )
+
+    day_key = now_utc.astimezone(timezone.utc).date().isoformat()
+    out_path = config.strategy_quotes_dir(strategy_id) / f"quotes_{day_key}.parquet"
+    pd.DataFrame(rows).to_parquet(out_path, index=False)
+
+
 def test_liquidity_gate_pass_then_dequal(monkeypatch, tmp_path):
     _patch_config_paths(monkeypatch, tmp_path)
     strategy_id = "weather_temp_high"
@@ -117,6 +150,28 @@ def test_liquidity_gate_pass_then_dequal(monkeypatch, tmp_path):
     third = runtime._compute_liquidity_state(strategy_id, t2)
     assert third["consecutive_failures"] >= 2
     assert third["qualified"] is False
+
+
+def test_liquidity_gate_accepts_one_tick_penny_books(monkeypatch, tmp_path):
+    _patch_config_paths(monkeypatch, tmp_path)
+    strategy_id = "weather_temp_high"
+    now_utc = datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc)
+
+    _write_penny_quotes(
+        strategy_id,
+        now_utc,
+        yes_bid=0.01,
+        yes_ask=0.02,
+        n=60,
+        depth=12,
+    )
+    out = runtime._compute_liquidity_state(strategy_id, now_utc)
+    last_window = dict(out.get("last_window") or {})
+
+    assert out["qualified"] is True
+    assert round(float(last_window.get("median_spread", 0.0) or 0.0), 6) == 1.0
+    assert round(float(last_window.get("median_spread_abs_dollars", 0.0) or 0.0), 6) == 0.01
+    assert round(float(last_window.get("median_spread_pct", 0.0) or 0.0), 6) > 0.15
 
 
 def test_entry_gate_fail_closed_conditions():
@@ -800,9 +855,11 @@ def test_variant_alerts_include_liquidity_block_details():
         liquidity={
             "qualified": False,
             "last_window": {
-                "median_spread": 0.62,
+                "median_spread": 1.24,
+                "median_spread_pct": 0.62,
+                "median_spread_abs_dollars": 0.01,
                 "median_depth": 3.0,
-                "thresholds": {"max_spread": 0.15, "min_depth": 10},
+                "thresholds": {"max_spread": 1.0, "max_spread_pct": 0.15, "max_spread_abs_dollars": 0.01, "min_depth": 10},
             },
         },
         train_gate_pass=True,
@@ -813,7 +870,9 @@ def test_variant_alerts_include_liquidity_block_details():
     codes = {str(a.get("code")) for a in alerts}
     assert "liquidity_blocked_weather_temp_high" in codes
     msg = next(str(a.get("message")) for a in alerts if str(a.get("code")) == "liquidity_blocked_weather_temp_high")
-    assert "spread=0.620 > 0.150 (fail)" in msg
+    assert "hybrid_spread=1.240 > 1.000 (fail)" in msg
+    assert "abs=$0.010 vs max($0.010, 0.150*mid)" in msg
+    assert "pct=0.620" in msg
     assert "depth=3.0 < 10.0 (fail)" in msg
 
 

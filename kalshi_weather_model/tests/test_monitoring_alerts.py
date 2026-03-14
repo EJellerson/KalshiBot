@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -38,6 +40,8 @@ def test_operational_alerts_ok_when_healthy() -> None:
     train = {"gate": {"pass": True}, "max_days_remaining": 0}
     inventory = {
         "stale_streams": [],
+        "ingest_gap_streams": [],
+        "ingest_gap_threshold_minutes": 2880.0,
         "stream_age_minutes": {},
         "freshness_threshold_minutes": {},
         "contracts_active": 6,
@@ -56,6 +60,35 @@ def test_operational_alerts_ok_when_healthy() -> None:
     assert out["status"] == "ok"
     assert out["alerts"] == []
     assert out.get("info", []) == []
+
+
+def test_operational_alerts_emit_ingest_stale_when_stream_gap_exceeds_48h() -> None:
+    train = {"gate": {"pass": True}, "max_days_remaining": 0}
+    inventory = {
+        "stale_streams": ["observations", "quotes"],
+        "ingest_gap_streams": ["observations", "quotes"],
+        "ingest_gap_threshold_minutes": 2880.0,
+        "stream_age_minutes": {"observations": 3000.0, "quotes": 3005.0},
+        "freshness_threshold_minutes": {"observations": 130.0, "quotes": 45.0},
+        "contracts_active": 6,
+        "contracts_age_minutes": 20.0,
+        "today_rows": {"signals": 4},
+    }
+    events = {
+        "minutes_since_by_event": {
+            "ingest_forecasts": 10.0,
+            "sync_observations": 40.0,
+            "paper_cycle": 10.0,
+        }
+    }
+
+    out = monitoring.operational_alerts_snapshot(train, inventory, events)
+    codes = {row["code"] for row in out["alerts"]}
+
+    assert "ingest_stale_observations" in codes
+    assert "ingest_stale_quotes" in codes
+    assert "stale_observations" not in codes
+    assert "stale_quotes" not in codes
 
 
 def test_variant_alerts_route_discovery_only_to_info(monkeypatch) -> None:
@@ -313,3 +346,45 @@ def test_inventory_empty_streams_are_marked_stale(monkeypatch, tmp_path) -> None
     assert "observations" in stale_streams
     assert "quotes" in stale_streams
     assert "signals" in stale_streams
+
+
+def test_inventory_ingest_gap_detects_stale_and_fresh_streams(monkeypatch, tmp_path) -> None:
+    _patch_monitoring_paths(monkeypatch, tmp_path)
+
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=49)
+
+    forecast_path = monitoring.config.FORECAST_SNAPSHOTS_DIR / "forecast_2026-03-03.parquet"
+    obs_path = monitoring.config.OBSERVATIONS_DIR / "obs_2026-03-03.parquet"
+    quote_path = monitoring.config.strategy_quotes_dir("weather_temp_high") / "quotes_2026-03-03.parquet"
+
+    pd.DataFrame([{"city": "NYC"}]).to_parquet(forecast_path, index=False)
+    pd.DataFrame([{"city": "NYC", "obs_date_local": "2026-03-03"}]).to_parquet(obs_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "ticker": "T1",
+                "ts_utc": now.isoformat(timespec="seconds"),
+                "yes_bid_dollars": 0.01,
+                "yes_ask_dollars": 0.02,
+                "no_bid_dollars": 0.98,
+                "no_ask_dollars": 0.99,
+                "yes_bid_size": 12,
+                "yes_ask_size": 12,
+                "no_bid_size": 12,
+                "no_ask_size": 12,
+            }
+        ]
+    ).to_parquet(quote_path, index=False)
+
+    old_ts = old.timestamp()
+    os.utime(obs_path, (old_ts, old_ts))
+    os.utime(quote_path, (now.timestamp(), now.timestamp()))
+    os.utime(forecast_path, (now.timestamp(), now.timestamp()))
+
+    snapshot = monitoring.data_inventory_snapshot()
+    ingest_gap_streams = set(snapshot.get("ingest_gap_streams") or [])
+
+    assert "observations" in ingest_gap_streams
+    assert "quotes" not in ingest_gap_streams
+    assert "forecasts" not in ingest_gap_streams

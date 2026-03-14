@@ -158,6 +158,10 @@ def _stream_freshness_thresholds() -> dict[str, float]:
     }
 
 
+def _ingest_stale_threshold_minutes() -> float:
+    return float(max(config.INGEST_STALE_ALERT_HOURS * 60.0, 60.0))
+
+
 def extract_observation_unique_days() -> dict[str, int]:
     rows = read_all_parquet_rows(config.OBSERVATIONS_DIR)
     city_to_days: dict[str, set[str]] = {city: set() for city in config.CITIES}
@@ -304,9 +308,18 @@ def data_inventory_snapshot() -> dict[str, Any]:
         if threshold is not None and (age is None or age > threshold):
             stale_streams.append(stream)
 
+    ingest_gap_streams: list[str] = []
+    ingest_gap_threshold_minutes = _ingest_stale_threshold_minutes()
+    for stream in ["forecasts", "observations", "quotes"]:
+        age = stream_age_minutes.get(stream)
+        if age is None or float(age) > ingest_gap_threshold_minutes:
+            ingest_gap_streams.append(stream)
+
     inventory["stream_age_minutes"] = stream_age_minutes
     inventory["freshness_threshold_minutes"] = thresholds
     inventory["stale_streams"] = stale_streams
+    inventory["ingest_gap_threshold_minutes"] = ingest_gap_threshold_minutes
+    inventory["ingest_gap_streams"] = ingest_gap_streams
     return inventory
 
 
@@ -385,7 +398,11 @@ def operational_alerts_snapshot(
             estimated_ready_date_local=eta_local,
         )
 
+    ingest_gap_streams = set(str(s) for s in (inventory_snapshot.get("ingest_gap_streams") or []))
+    ingest_gap_threshold = inventory_snapshot.get("ingest_gap_threshold_minutes")
     for stream in list(inventory_snapshot.get("stale_streams") or []):
+        if stream in ingest_gap_streams:
+            continue
         age = (inventory_snapshot.get("stream_age_minutes") or {}).get(stream)
         threshold = (inventory_snapshot.get("freshness_threshold_minutes") or {}).get(stream)
         add_alert(
@@ -395,6 +412,17 @@ def operational_alerts_snapshot(
             stream=stream,
             age_minutes=age,
             threshold_minutes=threshold,
+        )
+
+    for stream in sorted(ingest_gap_streams):
+        age = (inventory_snapshot.get("stream_age_minutes") or {}).get(stream)
+        add_alert(
+            "critical",
+            f"ingest_stale_{stream}",
+            f"{stream} ingest has not written new data in 48+ hours.",
+            stream=stream,
+            age_minutes=age,
+            threshold_minutes=ingest_gap_threshold,
         )
 
     contracts_active = int(inventory_snapshot.get("contracts_active", 0) or 0)

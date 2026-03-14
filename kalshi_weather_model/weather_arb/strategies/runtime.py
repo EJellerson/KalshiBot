@@ -32,6 +32,7 @@ from weather_arb.model.fair_value import (
     compute_ev_cents,
 )
 from weather_arb.pipeline.ingest import append_rows_to_parquet
+from weather_arb.risk.limits import hybrid_spread_score
 from weather_arb.utils.io_utils import read_or_create_json, safe_read_json, safe_write_json_atomic
 from weather_arb.utils.time_utils import day_key_in_zone
 
@@ -403,7 +404,9 @@ def _compute_liquidity_state(strategy_id: str, now_utc: datetime) -> dict[str, A
     lookback_start = now_utc - timedelta(days=max(int(config.STRATEGY_LIQ_LOOKBACK_DAYS), 1))
     rows = _read_all_parquet_rows(config.strategy_quotes_dir(strategy_id), prefix="quotes")
 
-    spreads: list[float] = []
+    spread_scores: list[float] = []
+    spread_pct_values: list[float] = []
+    spread_abs_values: list[float] = []
     depths: list[int] = []
     snapshot_count = 0
 
@@ -422,7 +425,25 @@ def _compute_liquidity_state(strategy_id: str, now_utc: datetime) -> dict[str, A
         no_mid = max((no_ask + no_bid) / 2.0, 1e-9)
         yes_spread = max(yes_ask - yes_bid, 0.0) / yes_mid
         no_spread = max(no_ask - no_bid, 0.0) / no_mid
-        spreads.append(max(yes_spread, no_spread))
+        spread_pct_values.append(max(yes_spread, no_spread))
+
+        yes_abs_spread = max(yes_ask - yes_bid, 0.0)
+        no_abs_spread = max(no_ask - no_bid, 0.0)
+        spread_abs_values.append(max(yes_abs_spread, no_abs_spread))
+
+        yes_score = hybrid_spread_score(
+            yes_bid,
+            yes_ask,
+            pct_limit=config.STRATEGY_LIQ_MAX_SPREAD_PCT,
+            abs_limit_dollars=config.STRATEGY_LIQ_MAX_SPREAD_ABS_DOLLARS,
+        )
+        no_score = hybrid_spread_score(
+            no_bid,
+            no_ask,
+            pct_limit=config.STRATEGY_LIQ_MAX_SPREAD_PCT,
+            abs_limit_dollars=config.STRATEGY_LIQ_MAX_SPREAD_ABS_DOLLARS,
+        )
+        spread_scores.append(max(yes_score, no_score))
 
         depth = min(
             int(row.get("yes_bid_size", 0) or 0),
@@ -432,14 +453,16 @@ def _compute_liquidity_state(strategy_id: str, now_utc: datetime) -> dict[str, A
         )
         depths.append(depth)
 
-    median_spread = float(median(spreads)) if spreads else None
+    median_spread = float(median(spread_scores)) if spread_scores else None
+    median_spread_pct = float(median(spread_pct_values)) if spread_pct_values else None
+    median_spread_abs = float(median(spread_abs_values)) if spread_abs_values else None
     median_depth = float(median(depths)) if depths else None
 
     pass_window = (
         snapshot_count >= int(config.STRATEGY_LIQ_MIN_SNAPSHOTS)
         and median_spread is not None
         and median_depth is not None
-        and median_spread <= float(config.STRATEGY_LIQ_MAX_SPREAD_PCT)
+        and median_spread <= 1.0
         and median_depth >= float(config.STRATEGY_LIQ_MIN_BOOK_SIZE)
     )
 
@@ -476,14 +499,19 @@ def _compute_liquidity_state(strategy_id: str, now_utc: datetime) -> dict[str, A
         "lookback_days": int(config.STRATEGY_LIQ_LOOKBACK_DAYS),
         "snapshot_count": snapshot_count,
         "median_spread": median_spread,
+        "median_spread_pct": median_spread_pct,
+        "median_spread_abs_dollars": median_spread_abs,
         "median_depth": median_depth,
         "pass": bool(pass_window),
         "qualified": bool(qualified),
         "thresholds": {
-            "max_spread": float(config.STRATEGY_LIQ_MAX_SPREAD_PCT),
+            "max_spread": 1.0,
+            "max_spread_pct": float(config.STRATEGY_LIQ_MAX_SPREAD_PCT),
+            "max_spread_abs_dollars": float(config.STRATEGY_LIQ_MAX_SPREAD_ABS_DOLLARS),
             "min_depth": int(config.STRATEGY_LIQ_MIN_BOOK_SIZE),
             "min_snapshots": int(config.STRATEGY_LIQ_MIN_SNAPSHOTS),
         },
+        "spread_rule": "hybrid_score=spread_abs/max(max_spread_abs_dollars, max_spread_pct*midpoint)",
     }
 
     state["qualified"] = bool(qualified)
@@ -714,9 +742,13 @@ def _variant_alerts(
         last_window = dict(liquidity.get("last_window") or {})
         thresholds = dict(last_window.get("thresholds") or {})
         median_spread = last_window.get("median_spread")
+        median_spread_pct = last_window.get("median_spread_pct")
+        median_spread_abs = last_window.get("median_spread_abs_dollars")
         median_depth = last_window.get("median_depth")
         snapshot_count = last_window.get("snapshot_count")
         max_spread = thresholds.get("max_spread")
+        max_spread_pct = thresholds.get("max_spread_pct")
+        max_spread_abs = thresholds.get("max_spread_abs_dollars")
         min_depth = thresholds.get("min_depth")
         min_snapshots = thresholds.get("min_snapshots")
 
@@ -726,6 +758,15 @@ def _variant_alerts(
             spread_eval = (
                 f"{float(median_spread):.3f} {'>' if spread_fail else '<='} {float(max_spread):.3f} "
                 f"({'fail' if spread_fail else 'pass'})"
+            )
+        spread_pct_eval = "n/a"
+        if median_spread_pct is not None and max_spread_pct is not None:
+            spread_pct_eval = f"{float(median_spread_pct):.3f}"
+        spread_abs_eval = "n/a"
+        if median_spread_abs is not None and max_spread_abs is not None:
+            spread_abs_eval = (
+                f"${float(median_spread_abs):.3f} vs max(${float(max_spread_abs):.3f}, "
+                f"{float(max_spread_pct):.3f}*mid)"
             )
         depth_eval = "n/a"
         if median_depth is not None and min_depth is not None:
@@ -747,7 +788,8 @@ def _variant_alerts(
                 "code": f"liquidity_blocked_{strategy_id}",
                 "message": (
                     "Liquidity gate blocked entries "
-                    f"(spread={spread_eval}, depth={depth_eval}, snapshots={snapshots_eval})."
+                    f"(hybrid_spread={spread_eval}, abs={spread_abs_eval}, pct={spread_pct_eval}, "
+                    f"depth={depth_eval}, snapshots={snapshots_eval})."
                 ),
             }
         )

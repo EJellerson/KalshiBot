@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from weather_arb.risk.limits import (
     cap_contracts_to_top_of_book,
     compute_hybrid_live_limits,
+    hybrid_spread_score,
     resolve_live_limits_for_day,
+    side_spread_metrics,
     spread_ok,
 )
 from weather_arb.types import MarketQuote
@@ -63,6 +65,67 @@ def test_spread_ok_is_side_aware_for_buy_no():
     )
     assert spread_ok(quote, side="buy_yes") is True
     assert spread_ok(quote, side="buy_no") is False
+
+
+def test_spread_ok_allows_one_tick_penny_contract():
+    quote = MarketQuote(
+        ticker="TEST",
+        ts_utc=datetime(2026, 3, 3, 14, 0, tzinfo=timezone.utc),
+        yes_bid_dollars=0.01,
+        yes_ask_dollars=0.02,
+        no_bid_dollars=0.97,
+        no_ask_dollars=0.98,
+        yes_bid_size=20,
+        yes_ask_size=20,
+        no_bid_size=20,
+        no_ask_size=20,
+    )
+    metrics = side_spread_metrics(quote, side="buy_yes")
+    assert round(metrics["spread_abs_dollars"], 6) == 0.01
+    assert round(metrics["spread_pct_mid"], 6) > 0.15
+    assert spread_ok(quote, side="buy_yes") is True
+
+
+def test_spread_ok_midrange_rejects_wide_book():
+    quote = MarketQuote(
+        ticker="TEST",
+        ts_utc=datetime(2026, 3, 3, 14, 0, tzinfo=timezone.utc),
+        yes_bid_dollars=0.20,
+        yes_ask_dollars=0.26,
+        no_bid_dollars=0.74,
+        no_ask_dollars=0.80,
+        yes_bid_size=20,
+        yes_ask_size=20,
+        no_bid_size=20,
+        no_ask_size=20,
+    )
+    assert spread_ok(quote, side="buy_yes") is False
+
+
+def test_spread_ok_high_price_uses_percentage_limit():
+    quote = MarketQuote(
+        ticker="TEST",
+        ts_utc=datetime(2026, 3, 3, 14, 0, tzinfo=timezone.utc),
+        yes_bid_dollars=0.89,
+        yes_ask_dollars=0.91,
+        no_bid_dollars=0.08,
+        no_ask_dollars=0.10,
+        yes_bid_size=20,
+        yes_ask_size=20,
+        no_bid_size=20,
+        no_ask_size=20,
+    )
+    assert spread_ok(quote, side="buy_yes") is True
+
+
+def test_hybrid_spread_score_at_crossover_boundary():
+    score = hybrid_spread_score(
+        bid_dollars=0.061,
+        ask_dollars=0.071,
+        pct_limit=0.15,
+        abs_limit_dollars=0.01,
+    )
+    assert round(score, 6) == 1.0
 
 
 def test_cap_to_book_depth_entry_and_exit_sides():
