@@ -414,6 +414,7 @@ def test_run_strategy_cycle_pre_train_blocks_opening_new_paper_entries(monkeypat
 
     def _capture_paper_cycle(signals, *_args, **_kwargs):
         captured["signals"] = list(signals)
+        captured["allow_new_entries"] = _kwargs.get("allow_new_entries")
         return {"opened": 0, "closed": 0, "open_positions": 0, "equity": 1000.0}
 
     monkeypatch.setattr(runtime, "run_paper_cycle", _capture_paper_cycle)
@@ -449,6 +450,7 @@ def test_run_strategy_cycle_pre_train_blocks_opening_new_paper_entries(monkeypat
     assert out["entry_gate"]["checks"]["train_ok"] is False
     assert out["train_gate"]["pass"] is False
     assert captured["signals"] == []
+    assert captured["allow_new_entries"] is False
 
 
 def test_run_strategy_cycle_benchmark_artifact_tracks_attempt_and_success(monkeypatch, tmp_path):

@@ -112,6 +112,139 @@ def test_paper_entry_capped_by_depth(monkeypatch, tmp_path):
     assert open_pos["cap_reason"] == "depth_cap_entry"
 
 
+def test_paper_cycle_blocks_new_entries_when_entries_disabled(tmp_path):
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    state_path = tmp_path / "paper_positions.json"
+    blotter_dir = tmp_path / "paper_blotter"
+
+    out = run_paper_cycle(
+        [
+            {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "city": "NYC",
+                "side": "buy_yes",
+                "ev_cents": 12.0,
+                "min_ev_cents": 6.0,
+                "settlement_ts_utc": (now + timedelta(hours=10)).isoformat(),
+            }
+        ],
+        {
+            "KXHIGHNYC-26MAR03-T75": {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "ts_utc": now.isoformat(),
+                "yes_bid_dollars": 0.49,
+                "yes_ask_dollars": 0.50,
+                "no_bid_dollars": 0.49,
+                "no_ask_dollars": 0.50,
+                "yes_bid_size": 25,
+                "yes_ask_size": 25,
+                "no_bid_size": 25,
+                "no_ask_size": 25,
+            }
+        },
+        now,
+        state_path=state_path,
+        blotter_dir=blotter_dir,
+        allow_new_entries=False,
+    )
+
+    state = safe_read_json(state_path) or {}
+    assert out["opened"] == 0
+    assert out["entries_allowed"] is False
+    assert state.get("open_positions", []) == []
+
+
+def test_paper_cycle_entries_disabled_still_manages_existing_positions(tmp_path):
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    state_path = tmp_path / "paper_positions.json"
+    blotter_dir = tmp_path / "paper_blotter"
+    safe_write_json_atomic(
+        state_path,
+        {
+            "equity": 1000.0,
+            "cash": 1000.0,
+            "open_positions": [
+                {
+                    "position_id": "paper_1",
+                    "ticker": "KXHIGHNYC-26MAR03-T75",
+                    "city": "NYC",
+                    "side": "buy_yes",
+                    "contracts": 10,
+                    "entry_price_dollars": 0.50,
+                    "entry_fees_dollars": 0.20,
+                    "opened_at_utc": (now - timedelta(hours=2)).isoformat(),
+                    "max_hold_until_utc": (now + timedelta(hours=5)).isoformat(),
+                    "settlement_ts_utc": (now + timedelta(hours=10)).isoformat(),
+                    "status": "open",
+                }
+            ],
+            "closed_positions": [],
+            "daily_pnl": {},
+            "weekly_pnl": {},
+            "consecutive_losses": 0,
+            "next_position_id": 2,
+        },
+    )
+
+    out = run_paper_cycle(
+        [
+            {
+                "ticker": "KXLOWNYC-26MAR03-T39",
+                "city": "NYC",
+                "side": "buy_no",
+                "ev_cents": 12.0,
+                "min_ev_cents": 6.0,
+                "settlement_ts_utc": (now + timedelta(hours=10)).isoformat(),
+            },
+            {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "side": "buy_yes",
+                "ev_cents": 0.0,
+                "min_ev_cents": 6.0,
+                "settlement_ts_utc": (now + timedelta(hours=10)).isoformat(),
+            },
+        ],
+        {
+            "KXHIGHNYC-26MAR03-T75": {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "ts_utc": now.isoformat(),
+                "yes_bid_dollars": 0.45,
+                "yes_ask_dollars": 0.46,
+                "no_bid_dollars": 0.54,
+                "no_ask_dollars": 0.55,
+                "yes_bid_size": 25,
+                "yes_ask_size": 25,
+                "no_bid_size": 25,
+                "no_ask_size": 25,
+            },
+            "KXLOWNYC-26MAR03-T39": {
+                "ticker": "KXLOWNYC-26MAR03-T39",
+                "ts_utc": now.isoformat(),
+                "yes_bid_dollars": 0.30,
+                "yes_ask_dollars": 0.31,
+                "no_bid_dollars": 0.69,
+                "no_ask_dollars": 0.70,
+                "yes_bid_size": 25,
+                "yes_ask_size": 25,
+                "no_bid_size": 25,
+                "no_ask_size": 25,
+            },
+        },
+        now,
+        state_path=state_path,
+        blotter_dir=blotter_dir,
+        allow_new_entries=False,
+    )
+
+    state = safe_read_json(state_path) or {}
+    assert out["opened"] == 0
+    assert out["closed"] == 1
+    assert out["entries_allowed"] is False
+    assert len(state.get("closed_positions", [])) == 1
+    assert state["closed_positions"][0]["ticker"] == "KXHIGHNYC-26MAR03-T75"
+    assert state.get("open_positions", []) == []
+
+
 def test_paper_exit_capped_by_bid_depth_partial_close(tmp_path):
     now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
     state_path = tmp_path / "paper_positions.json"

@@ -764,6 +764,8 @@ def cmd_paper_cycle(_args: argparse.Namespace) -> None:
     signals, quote_map, skipped = _build_signals_and_quotes(now)
     append_quote_rows(list(quote_map.values()), now)
     append_signal_rows(signals, now)
+    train = train_gate_snapshot()
+    train_pass = bool((train.get("gate") or {}).get("pass", False))
 
     model = (
         _latest_model_for_status("wf_passed")
@@ -771,19 +773,19 @@ def cmd_paper_cycle(_args: argparse.Namespace) -> None:
         or _latest_model_for_status("paper")
         or _latest_model_for_status("champion_live")
     )
+    allow_new_entries = bool(model) and train_pass
+    entry_block_reasons: list[str] = []
     if not model:
-        out = {
-            "skipped": True,
-            "reason": "no eligible model for paper trading",
-            "signals": len(signals),
-            "skipped_contracts": len(skipped),
-            "quotes": len(quote_map),
-        }
-        _append_governance_log({"ts": now.isoformat(), "event": "paper_cycle_data_only", **out})
-        print(json.dumps(out, indent=2))
-        return
+        entry_block_reasons.append("no_eligible_model")
+    if not train_pass:
+        entry_block_reasons.append("train_gate")
 
-    summary = run_paper_cycle(signals, quote_map, now)
+    summary = run_paper_cycle(
+        signals,
+        quote_map,
+        now,
+        allow_new_entries=allow_new_entries,
+    )
     paper_state = safe_read_json(config.PAPER_POSITIONS_PATH) or {}
     metrics = compute_day_metrics(list(paper_state.get("closed_positions", [])), _date_key_now())
     metrics["date_key"] = _date_key_now()
@@ -793,9 +795,14 @@ def cmd_paper_cycle(_args: argparse.Namespace) -> None:
         "summary": summary,
         "signals": len(signals),
         "skipped_contracts": len(skipped),
-        "model_status": model.get("status"),
+        "quotes": len(quote_map),
+        "train_gate_pass": train_pass,
+        "entry_blocked": not allow_new_entries,
+        "entry_block_reasons": entry_block_reasons,
+        "model_status": model.get("status") if model else None,
     }
-    _append_governance_log({"ts": now.isoformat(), "event": "paper_cycle", **out})
+    event_name = "paper_cycle" if allow_new_entries else "paper_cycle_manage_only"
+    _append_governance_log({"ts": now.isoformat(), "event": event_name, **out})
     print(json.dumps(out, indent=2))
 
 

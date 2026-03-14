@@ -121,6 +121,7 @@ def run_paper_cycle(
     *,
     state_path: Path = config.PAPER_POSITIONS_PATH,
     blotter_dir: Path = config.PAPER_BLOTTER_DIR,
+    allow_new_entries: bool = True,
 ) -> dict[str, Any]:
     state = read_or_create_json(state_path, _default_state())
     limits = paper_limits()
@@ -255,69 +256,70 @@ def run_paper_cycle(
     open_positions = kept_open
 
     opened_count = 0
-    for raw in normalized_signals:
-        ticker = str(raw.get("ticker", ""))
-        if any(str(pos.get("ticker", "")) == ticker for pos in open_positions):
-            continue
-        if not can_open_more(len(open_positions), limits):
-            break
+    if allow_new_entries:
+        for raw in normalized_signals:
+            ticker = str(raw.get("ticker", ""))
+            if any(str(pos.get("ticker", "")) == ticker for pos in open_positions):
+                continue
+            if not can_open_more(len(open_positions), limits):
+                break
 
-        ev_cents = float(raw.get("ev_cents", 0.0) or 0.0)
-        if ev_cents < float(raw.get("min_ev_cents", config.BOOTSTRAP_MIN_EV_CENTS)):
-            continue
+            ev_cents = float(raw.get("ev_cents", 0.0) or 0.0)
+            if ev_cents < float(raw.get("min_ev_cents", config.BOOTSTRAP_MIN_EV_CENTS)):
+                continue
 
-        side = str(raw.get("side", "buy_yes"))
-        quote_raw = quote_map.get(ticker)
-        if not quote_raw:
-            continue
-        quote = _to_quote(quote_raw)
-        if not spread_ok(quote, side=side) or not depth_ok(quote):
-            continue
+            side = str(raw.get("side", "buy_yes"))
+            quote_raw = quote_map.get(ticker)
+            if not quote_raw:
+                continue
+            quote = _to_quote(quote_raw)
+            if not spread_ok(quote, side=side) or not depth_ok(quote):
+                continue
 
-        entry_px = _entry_price(quote, side)
-        requested_contracts = contracts_for_notional(entry_px, limits.max_position_dollars)
-        contracts, cap_reason = cap_contracts_to_top_of_book(
-            requested_contracts,
-            quote,
-            side,
-            action="entry",
-        )
-        if contracts < requested_contracts:
-            capped_entry_count += 1
-        if contracts <= 0:
-            depth_skipped_count += 1
-            continue
+            entry_px = _entry_price(quote, side)
+            requested_contracts = contracts_for_notional(entry_px, limits.max_position_dollars)
+            contracts, cap_reason = cap_contracts_to_top_of_book(
+                requested_contracts,
+                quote,
+                side,
+                action="entry",
+            )
+            if contracts < requested_contracts:
+                capped_entry_count += 1
+            if contracts <= 0:
+                depth_skipped_count += 1
+                continue
 
-        pos_id = int(state.get("next_position_id", 1) or 1)
-        state["next_position_id"] = pos_id + 1
+            pos_id = int(state.get("next_position_id", 1) or 1)
+            state["next_position_id"] = pos_id + 1
 
-        settlement_ts = raw.get("settlement_ts_utc") or (now_utc + timedelta(days=1)).isoformat()
-        settlement_dt = _parse_iso_utc(settlement_ts) or (now_utc + timedelta(days=1))
-        max_hold_until = min(
-            now_utc + timedelta(hours=config.MAX_HOLD_HOURS),
-            settlement_dt - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
-        )
+            settlement_ts = raw.get("settlement_ts_utc") or (now_utc + timedelta(days=1)).isoformat()
+            settlement_dt = _parse_iso_utc(settlement_ts) or (now_utc + timedelta(days=1))
+            max_hold_until = min(
+                now_utc + timedelta(hours=config.MAX_HOLD_HOURS),
+                settlement_dt - timedelta(hours=config.SETTLEMENT_CUTOFF_HOURS),
+            )
 
-        pos = {
-            "position_id": f"paper_{pos_id}",
-            "ticker": ticker,
-            "city": str(raw.get("city", "")),
-            "side": side,
-            "contracts": contracts,
-            "entry_price_dollars": entry_px,
-            "entry_fees_dollars": contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS,
-            "opened_at_utc": now_utc.isoformat(),
-            "max_hold_until_utc": max_hold_until.isoformat(),
-            "settlement_ts_utc": settlement_ts,
-            "status": "open",
-            "threshold_f": float(raw.get("threshold_f", 0.0) or 0.0),
-            "entry_ev_cents": ev_cents,
-            "requested_contracts": requested_contracts,
-            "capped_contracts": contracts,
-            "cap_reason": cap_reason,
-        }
-        open_positions.append(pos)
-        opened_count += 1
+            pos = {
+                "position_id": f"paper_{pos_id}",
+                "ticker": ticker,
+                "city": str(raw.get("city", "")),
+                "side": side,
+                "contracts": contracts,
+                "entry_price_dollars": entry_px,
+                "entry_fees_dollars": contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS,
+                "opened_at_utc": now_utc.isoformat(),
+                "max_hold_until_utc": max_hold_until.isoformat(),
+                "settlement_ts_utc": settlement_ts,
+                "status": "open",
+                "threshold_f": float(raw.get("threshold_f", 0.0) or 0.0),
+                "entry_ev_cents": ev_cents,
+                "requested_contracts": requested_contracts,
+                "capped_contracts": contracts,
+                "cap_reason": cap_reason,
+            }
+            open_positions.append(pos)
+            opened_count += 1
 
     state["open_positions"] = open_positions
     state["closed_positions"] = closed_positions
@@ -334,6 +336,7 @@ def run_paper_cycle(
         "capped_entries": capped_entry_count,
         "capped_exits": capped_exit_count,
         "depth_skipped": depth_skipped_count,
+        "entries_allowed": bool(allow_new_entries),
     }
     _write_blotter_line(blotter_dir, date_key, summary)
     return summary

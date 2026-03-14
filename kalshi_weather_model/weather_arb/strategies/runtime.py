@@ -1008,6 +1008,7 @@ def run_strategy_cycle(
             now,
             state_path=config.strategy_paper_positions_path(strategy_id),
             blotter_dir=config.strategy_paper_dir(strategy_id) / "paper_blotter",
+            allow_new_entries=bool(entry_allowed),
         )
 
         paper_state = safe_read_json(config.strategy_paper_positions_path(strategy_id)) or {}
