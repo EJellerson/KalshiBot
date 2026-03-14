@@ -878,17 +878,12 @@ def cmd_governance_eval(_args: argparse.Namespace) -> None:
     )
     result = lifecycle.apply_paper_metrics(str(model["model_id"]), metrics)
 
-    promoted = None
-    latest = model_registry.get_model(str(model["model_id"]))
-    if latest and str(latest.get("status")) == "paper":
-        promoted = lifecycle.auto_promote_if_ready(str(model["model_id"]), scope_key="global")
-
     event = {
         "ts": _utc_now().isoformat(timespec="seconds"),
         "model_id": model.get("model_id"),
         "metrics": metrics,
         "result": result,
-        "promoted": promoted,
+        "promoted": None,
     }
     _append_governance_log(event)
     print(json.dumps(event, indent=2, default=str))
