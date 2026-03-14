@@ -28,6 +28,7 @@ from weather_arb.execution.live_engine import run_live_cycle
 from weather_arb.execution.metrics import compute_day_metrics, max_drawdown_from_daily_pnl
 from weather_arb.execution.paper_engine import run_paper_cycle
 from weather_arb.execution.settlement import apply_settlements_to_positions, parse_settlements_payload
+from weather_arb.fees import estimated_entry_cost_cents
 from weather_arb.governance import lifecycle, model_registry
 from weather_arb.governance.live_routing import live_routing_status
 from weather_arb.model.contract_discovery import contracts_to_frame, discover_temperature_contracts
@@ -347,10 +348,21 @@ def _build_signals_and_quotes(now_utc: datetime) -> tuple[list[dict[str, Any]], 
 
         yes_price = float(parsed["yes_ask_dollars"])
         no_price = float(parsed["no_ask_dollars"])
-        est_cost_cents = (config.KALSHI_FEE_PER_CONTRACT_DOLLARS * 100.0) + config.DEFAULT_SLIPPAGE_CENTS
+        est_cost_cents_yes = estimated_entry_cost_cents(
+            yes_price,
+            max_position_dollars=config.PAPER_MAX_POSITION_DOLLARS,
+            available_contracts=int(parsed.get("yes_ask_size", 0) or 0),
+            slippage_cents=config.DEFAULT_SLIPPAGE_CENTS,
+        )
+        est_cost_cents_no = estimated_entry_cost_cents(
+            no_price,
+            max_position_dollars=config.PAPER_MAX_POSITION_DOLLARS,
+            available_contracts=int(parsed.get("no_ask_size", 0) or 0),
+            slippage_cents=config.DEFAULT_SLIPPAGE_CENTS,
+        )
 
-        ev_yes = compute_ev_cents(p_fair=p_fair, p_market=yes_price, est_cost_cents=est_cost_cents)
-        ev_no = compute_ev_cents(p_fair=(1.0 - p_fair), p_market=no_price, est_cost_cents=est_cost_cents)
+        ev_yes = compute_ev_cents(p_fair=p_fair, p_market=yes_price, est_cost_cents=est_cost_cents_yes)
+        ev_no = compute_ev_cents(p_fair=(1.0 - p_fair), p_market=no_price, est_cost_cents=est_cost_cents_no)
 
         side = "buy_yes" if ev_yes >= ev_no else "buy_no"
         best_ev = max(ev_yes, ev_no)

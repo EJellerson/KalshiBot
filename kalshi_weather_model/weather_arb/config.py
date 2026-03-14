@@ -281,7 +281,11 @@ MAX_SPREAD_PCT = 0.15
 MIN_BOOK_SIZE = 5
 
 # Fees/slippage
-KALSHI_FEE_PER_CONTRACT_DOLLARS = 0.02
+# Kalshi general matched-order fee schedule:
+# taker: ceil(0.07 * contracts * price * (1 - price), $0.01)
+# maker: ceil(0.0175 * contracts * price * (1 - price), $0.01)
+KALSHI_TAKER_FEE_RATE = 0.07
+KALSHI_MAKER_FEE_RATE = 0.0175
 DEFAULT_SLIPPAGE_CENTS = 0.5
 
 # Paper risk

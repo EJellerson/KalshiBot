@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from weather_arb.execution.paper_engine import _to_quote, run_paper_cycle
+from weather_arb.fees import kalshi_trading_fee_dollars
 from weather_arb.utils.io_utils import safe_read_json, safe_write_json_atomic
 
 
@@ -109,7 +110,81 @@ def test_paper_entry_capped_by_depth(monkeypatch, tmp_path):
     open_pos = list(state.get("open_positions", []))[0]
     assert int(open_pos["requested_contracts"]) == 10
     assert int(open_pos["contracts"]) == 6
+    assert float(open_pos["entry_fees_dollars"]) == kalshi_trading_fee_dollars(6, 0.50)
     assert open_pos["cap_reason"] == "depth_cap_entry"
+
+
+def test_paper_realized_pnl_includes_entry_and_exit_fees(tmp_path):
+    now = datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc)
+    state_path = tmp_path / "paper_positions.json"
+    blotter_dir = tmp_path / "paper_blotter"
+
+    run_paper_cycle(
+        [
+            {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "city": "NYC",
+                "side": "buy_yes",
+                "ev_cents": 12.0,
+                "min_ev_cents": 6.0,
+                "settlement_ts_utc": (now + timedelta(hours=10)).isoformat(),
+            }
+        ],
+        {
+            "KXHIGHNYC-26MAR03-T75": {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "ts_utc": now.isoformat(),
+                "yes_bid_dollars": 0.49,
+                "yes_ask_dollars": 0.50,
+                "no_bid_dollars": 0.49,
+                "no_ask_dollars": 0.50,
+                "yes_bid_size": 10,
+                "yes_ask_size": 10,
+                "no_bid_size": 10,
+                "no_ask_size": 10,
+            }
+        },
+        now,
+        state_path=state_path,
+        blotter_dir=blotter_dir,
+    )
+
+    later = now + timedelta(hours=1)
+    out = run_paper_cycle(
+        [
+            {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "side": "buy_yes",
+                "ev_cents": 0.0,
+                "min_ev_cents": 6.0,
+                "settlement_ts_utc": (later + timedelta(hours=9)).isoformat(),
+            }
+        ],
+        {
+            "KXHIGHNYC-26MAR03-T75": {
+                "ticker": "KXHIGHNYC-26MAR03-T75",
+                "ts_utc": later.isoformat(),
+                "yes_bid_dollars": 0.45,
+                "yes_ask_dollars": 0.46,
+                "no_bid_dollars": 0.54,
+                "no_ask_dollars": 0.55,
+                "yes_bid_size": 10,
+                "yes_ask_size": 10,
+                "no_bid_size": 10,
+                "no_ask_size": 10,
+            }
+        },
+        later,
+        state_path=state_path,
+        blotter_dir=blotter_dir,
+    )
+
+    state = safe_read_json(state_path) or {}
+    closed = list(state.get("closed_positions", []))[0]
+    expected_pnl = (0.45 - 0.50) * 10 - kalshi_trading_fee_dollars(10, 0.50) - kalshi_trading_fee_dollars(10, 0.45)
+
+    assert out["closed"] == 1
+    assert float(closed["realized_pnl_dollars"]) == expected_pnl
 
 
 def test_paper_cycle_blocks_new_entries_when_entries_disabled(tmp_path):

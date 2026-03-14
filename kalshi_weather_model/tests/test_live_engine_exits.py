@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from weather_arb.fees import kalshi_trading_fee_dollars
 from weather_arb.execution.live_engine import _exit_filled, run_live_cycle
 from weather_arb.utils.io_utils import safe_read_json, safe_write_json_atomic
 
@@ -119,6 +120,8 @@ def test_live_exit_on_ev_drop_places_sell_reduce_order(monkeypatch, tmp_path):
     assert order["time_in_force"] == "fill_or_kill"
     assert len(state.get("open_positions", [])) == 0
     assert len(state.get("closed_positions", [])) == 1
+    expected_pnl = (0.45 - 0.50) * 10 - 0.20 - kalshi_trading_fee_dollars(10, 0.45)
+    assert float(state["closed_positions"][0]["realized_pnl_dollars"]) == expected_pnl
 
 
 def test_live_exit_on_time_hold_limit(monkeypatch, tmp_path):
@@ -253,6 +256,7 @@ def test_live_exit_capped_by_bid_depth_partial_close(monkeypatch, tmp_path):
     assert int(state["closed_positions"][0]["contracts"]) == 3
     assert len(state.get("open_positions", [])) == 1
     assert int(state["open_positions"][0]["contracts"]) == 7
+    assert round(float(state["open_positions"][0]["entry_fees_dollars"]), 6) == 0.14
 
 
 def test_live_exit_depth_cap_zero_skips_order(monkeypatch, tmp_path):

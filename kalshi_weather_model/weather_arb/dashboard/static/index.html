@@ -898,7 +898,7 @@
 
         useEffect(() => {
           refresh();
-          intervalRef.current = setInterval(refresh, 15000);
+          intervalRef.current = setInterval(refresh, 60000);
           return () => clearInterval(intervalRef.current);
         }, []);
 
@@ -930,15 +930,15 @@
               if (onReconnected) onReconnected();
               await refresh();
               await checkSchedulerStatus();
-              intervalRef.current = setInterval(refresh, 15000);
+              intervalRef.current = setInterval(refresh, 60000);
             } catch {
-              if (attempts > 60) {
+              if (attempts > 40) {
                 clearInterval(poll);
                 setReconnecting(false);
-                setErr("Dashboard did not come back after 60s. Check services manually.");
+                setErr("Dashboard did not come back after 120s. Check services manually.");
               }
             }
-          }, 1000);
+          }, 3000);
         }, [refresh, checkSchedulerStatus]);
 
         /* Service actions */
@@ -1158,7 +1158,7 @@
                 <h1>Kalshi Weather Ops Dashboard</h1>
                 <div className="meta">Live view of data pipeline, gating, and scheduler heartbeat</div>
                 <div className="chips">
-                  <span className="chip">refresh 15s</span>
+                  <span className="chip">refresh 60s</span>
                   <span className="chip">cycle {runtime.scheduler_interval_minutes ?? "-"}m</span>
                   <span className="chip">obs sync {runtime.obs_sync_interval_minutes ?? "-"}m</span>
                   <span className="chip">live routing: {summary?.live?.allow_live_trading ? "ON" : "OFF"}</span>

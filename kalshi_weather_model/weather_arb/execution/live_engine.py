@@ -7,6 +7,7 @@ import json
 
 from weather_arb import config
 from weather_arb.connectors.kalshi import KalshiAuthClient
+from weather_arb.fees import kalshi_trading_fee_dollars, split_entry_fees_dollars
 from weather_arb.risk.limits import (
     cap_contracts_to_top_of_book,
     can_open_more,
@@ -524,8 +525,13 @@ def run_live_cycle(
             continue
 
         entry_px = float(pos.get("entry_price_dollars", 0.0) or 0.0)
-        fees = close_contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
-        pnl = (exit_px - entry_px) * close_contracts - fees
+        entry_fees_closed, entry_fees_remaining = split_entry_fees_dollars(
+            float(pos.get("entry_fees_dollars", 0.0) or 0.0),
+            requested_contracts,
+            close_contracts,
+        )
+        exit_fees = kalshi_trading_fee_dollars(close_contracts, exit_px)
+        pnl = (exit_px - entry_px) * close_contracts - entry_fees_closed - exit_fees
         out = dict(pos)
         out["status"] = "closed"
         out["closed_at_utc"] = now_utc.isoformat()
@@ -544,7 +550,7 @@ def run_live_cycle(
             remaining = dict(pos)
             remaining_contracts = requested_contracts - close_contracts
             remaining["contracts"] = remaining_contracts
-            remaining["entry_fees_dollars"] = remaining_contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS
+            remaining["entry_fees_dollars"] = entry_fees_remaining
             kept_open.append(remaining)
 
         state.setdefault("daily_pnl", {})[date_key] = float(state.get("daily_pnl", {}).get(date_key, 0.0) or 0.0) + pnl
@@ -651,7 +657,7 @@ def run_live_cycle(
                 "side": side,
                 "contracts": contracts,
                 "entry_price_dollars": entry_price,
-                "entry_fees_dollars": contracts * config.KALSHI_FEE_PER_CONTRACT_DOLLARS,
+                "entry_fees_dollars": kalshi_trading_fee_dollars(contracts, entry_price),
                 "opened_at_utc": now_utc.isoformat(),
                 "max_hold_until_utc": max_hold.isoformat(),
                 "settlement_ts_utc": settlement_ts,
