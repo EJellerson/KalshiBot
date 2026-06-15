@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections import Counter
 import os
+import secrets
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -167,11 +168,52 @@ def _status_counts(registry: dict[str, Any]) -> dict[str, int]:
     return out
 
 
+def _cors_allowed_origins() -> list[str]:
+    """Resolve allowed CORS origins from the environment.
+
+    Reads WEATHER_ARB_DASHBOARD_CORS_ORIGINS (comma-separated). Defaults to
+    localhost-only origins. Wildcard ("*") is never allowed by default; an
+    operator who explicitly needs it must opt in via the env var.
+    """
+    raw = os.getenv("WEATHER_ARB_DASHBOARD_CORS_ORIGINS", "").strip()
+    if not raw:
+        return ["http://127.0.0.1:8077", "http://localhost:8077"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def require_admin_token(x_admin_token: str | None = Header(default=None)) -> None:
+    """Auth gate for the mutating /api/ops/* endpoints.
+
+    SECURITY: these endpoints control local services (launchctl
+    restart/shutdown/bootstrap of the trading scheduler and dashboard) and
+    MUST NOT be exposed on a public network interface. Access requires an
+    admin token supplied in the ``X-Admin-Token`` request header and matched
+    against the ``WEATHER_ARB_DASHBOARD_ADMIN_TOKEN`` environment variable.
+
+    - If ``WEATHER_ARB_DASHBOARD_ADMIN_TOKEN`` is unset/empty, the mutating
+      ops endpoints are DISABLED and return HTTP 403.
+    - If the header is missing or does not match, return HTTP 403.
+    Read-only endpoints (including GET /api/ops/status) are intentionally
+    not gated so local read-only dashboard usage keeps working.
+    """
+    expected = os.getenv("WEATHER_ARB_DASHBOARD_ADMIN_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=403,
+            detail="ops endpoints disabled: WEATHER_ARB_DASHBOARD_ADMIN_TOKEN is not set",
+        )
+    provided = (x_admin_token or "").strip()
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="invalid or missing X-Admin-Token")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Kalshi Weather Dashboard", version="0.1.0")
+    # CORS is restricted to env-configured origins (localhost-only by default);
+    # wildcard is not used so a hostile web page cannot drive the dashboard API.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=_cors_allowed_origins(),
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -445,9 +487,13 @@ def create_app() -> FastAPI:
         }
 
     # ── Service management ────────────────────────────────────
+    # SECURITY: the mutating POST /api/ops/* endpoints below shell out to
+    # launchctl to control local services. They are gated by
+    # require_admin_token (X-Admin-Token header) and MUST NOT be exposed on a
+    # public interface. Keep the dashboard bound to localhost (127.0.0.1).
 
-    _SCHEDULER_LABEL = "com.ericjellerson.kalshi-weather.scheduler"
-    _DASHBOARD_LABEL = "com.ericjellerson.kalshi-weather.dashboard"
+    _SCHEDULER_LABEL = "com.kalshi-weather.scheduler"
+    _DASHBOARD_LABEL = "com.kalshi-weather.dashboard"
     _SCHEDULER_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{_SCHEDULER_LABEL}.plist"
 
     def _gui_prefix() -> str:
@@ -486,7 +532,7 @@ def create_app() -> FastAPI:
             "dashboard": "loaded" if _service_loaded(_DASHBOARD_LABEL) else "stopped",
         }
 
-    @app.post("/api/ops/restart")
+    @app.post("/api/ops/restart", dependencies=[Depends(require_admin_token)])
     def ops_restart() -> dict[str, Any]:
         """Restart both scheduler and dashboard via kickstart -k.
 
@@ -517,7 +563,7 @@ def create_app() -> FastAPI:
 
         return {"ok": True, "action": "restart", "results": results}
 
-    @app.post("/api/ops/shutdown")
+    @app.post("/api/ops/shutdown", dependencies=[Depends(require_admin_token)])
     def ops_shutdown() -> dict[str, Any]:
         """Stop the scheduler (bootout) and restart the dashboard.
 
@@ -547,7 +593,7 @@ def create_app() -> FastAPI:
 
         return {"ok": True, "action": "shutdown", "results": results}
 
-    @app.post("/api/ops/start-scheduler")
+    @app.post("/api/ops/start-scheduler", dependencies=[Depends(require_admin_token)])
     def ops_start_scheduler() -> dict[str, Any]:
         """Re-bootstrap and start the scheduler after a shutdown."""
         prefix = _gui_prefix()

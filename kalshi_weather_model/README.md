@@ -45,17 +45,24 @@ python -m weather_arb dashboard --host 127.0.0.1 --port 8077
   - scheduler heartbeat (minutes since key events)
   - operational alerts (blocked train gate, stale streams, cycle gaps, no-signal warnings)
 
+## Dashboard security
+- Bind to localhost only (`--host 127.0.0.1`). Never expose the dashboard on a public interface.
+- Mutating service-control endpoints (`POST /api/ops/restart|shutdown|start-scheduler`) are gated:
+  - Set `WEATHER_ARB_DASHBOARD_ADMIN_TOKEN` to enable them; if unset they return `403`.
+  - Requests must send the token in the `X-Admin-Token` header.
+- CORS is restricted via `WEATHER_ARB_DASHBOARD_CORS_ORIGINS` (comma-separated). Defaults to localhost origins only; no wildcard.
+
 ## launchd (24/7 local runtime)
 ```bash
-cd /Users/ericjellerson/KalshiBot/kalshi_weather_model
+cd /path/to/KalshiBot/kalshi_weather_model
 chmod +x ops/run_scheduler.sh ops/run_dashboard.sh ops/launchd/install_launchd.sh ops/launchd/uninstall_launchd.sh
 ./ops/launchd/install_launchd.sh
 ```
 
 Check status:
 ```bash
-launchctl print "gui/$(id -u)/com.ericjellerson.kalshi-weather.scheduler" | head -n 30
-launchctl print "gui/$(id -u)/com.ericjellerson.kalshi-weather.dashboard" | head -n 30
+launchctl print "gui/$(id -u)/com.kalshi-weather.scheduler" | head -n 30
+launchctl print "gui/$(id -u)/com.kalshi-weather.dashboard" | head -n 30
 curl -sS http://127.0.0.1:8077/health
 ```
 

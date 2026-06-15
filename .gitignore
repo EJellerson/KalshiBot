@@ -1,1 +1,33 @@
+# ── Secrets & credentials ──────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+.kalshi/
+
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.lock
+*.tmp
+
+# ── Data, artifacts & logs ─────────────────────────────
+data/
+logs/
+*.log
+
+# ── Local tooling / editor / OS ────────────────────────
+.claude/
+*.local.json
+.DS_Store
+
+# ── Project-specific ───────────────────────────────────
 /Scope_of_Project.py

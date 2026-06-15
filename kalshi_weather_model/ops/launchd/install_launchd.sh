@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${(%):-%N}")" && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 
-SCHEDULER_LABEL="com.ericjellerson.kalshi-weather.scheduler"
-DASHBOARD_LABEL="com.ericjellerson.kalshi-weather.dashboard"
+SCHEDULER_LABEL="com.kalshi-weather.scheduler"
+DASHBOARD_LABEL="com.kalshi-weather.dashboard"
 
 SCHEDULER_DST="$LAUNCH_AGENTS_DIR/${SCHEDULER_LABEL}.plist"
 DASHBOARD_DST="$LAUNCH_AGENTS_DIR/${DASHBOARD_LABEL}.plist"
